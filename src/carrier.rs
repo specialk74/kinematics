@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use rand::prelude::*;
 
 use crate::WORK_AREA_LEFT;
+use crate::divert::Divert;
 use crate::gate::{Gate, blocks_circle};
 
 pub const BELT_SPEED: f32 = 100.0;
@@ -80,25 +81,28 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
     }
 }
 
-fn carrier_velocity(carrier: &Carrier, translation: Vec3) -> Vec3 {
-    if carrier.0 == CarrierType::WithTube {
-        let pos = translation.x.abs();
-        if pos < 16.0 {
-            Vec3::new(-CARRIER_DIVERT_SPEED, BELT_SPEED, 0.0)
-        } else if translation.x < -300.0 && translation.x > -(300.0 + 32.0) {
-            Vec3::new(-CARRIER_DIVERT_SPEED, -BELT_SPEED, 0.0)
-        } else {
-            Vec3::new(-BELT_SPEED, 0.0, 0.0)
-        }
-    } else {
-        Vec3::new(-BELT_SPEED, 0.0, 0.0)
+/// Solo i carrier con tubo vengono deviati; gli altri tirano dritto sulla corsia.
+fn carrier_velocity(carrier: &Carrier, translation: Vec3, diverts: &[(&Divert, Vec3)]) -> Vec3 {
+    let straight = Vec3::new(-BELT_SPEED, 0.0, 0.0);
+
+    if carrier.0 != CarrierType::WithTube {
+        return straight;
     }
+
+    for (divert, position) in diverts {
+        if divert.catches(*position, translation) {
+            return Vec3::new(-CARRIER_DIVERT_SPEED, divert.lift_sign() * BELT_SPEED, 0.0);
+        }
+    }
+
+    straight
 }
 
 fn move_carrier(
     time: Res<Time>,
     mut query: Query<(Entity, &Carrier, &mut Transform)>,
     gates: Query<(&Gate, &Transform), Without<Carrier>>,
+    diverts: Query<(&Divert, &Transform), Without<Carrier>>,
 ) {
     let delta_secs = time.delta_secs();
 
@@ -106,6 +110,11 @@ fn move_carrier(
         .iter()
         .filter(|(gate, _)| gate.active)
         .map(|(_, transform)| transform.translation)
+        .collect();
+
+    let diverts: Vec<(&Divert, Vec3)> = diverts
+        .iter()
+        .map(|(divert, transform)| (divert, transform.translation))
         .collect();
 
     // Si risolve un carrier alla volta partendo da quello piu' avanti sul nastro:
@@ -117,7 +126,7 @@ fn move_carrier(
             (
                 entity,
                 translation,
-                carrier_velocity(carrier, translation) * delta_secs,
+                carrier_velocity(carrier, translation, &diverts) * delta_secs,
             )
         })
         .collect();

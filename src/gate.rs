@@ -1,3 +1,4 @@
+use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 
 pub const GATE_WIDTH: f32 = 8.0;
@@ -66,9 +67,9 @@ pub fn spawn_gate(commands: &mut Commands, assets: &GateAssets, position: Vec3) 
 
 /// Commuta il gate sotto al punto indicato, colore compreso. Restituisce `false`
 /// se li' non c'e' nessun gate, cosi' chi chiama sa che il clic e' ancora libero.
-pub fn toggle_gate_at(
+pub fn toggle_gate_at<F: QueryFilter>(
     position: Vec2,
-    gates: &mut Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>)>,
+    gates: &mut Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>), F>,
     assets: &GateAssets,
 ) -> bool {
     for (mut gate, transform, mut material) in gates.iter_mut() {

@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::WORK_AREA_LEFT;
-use crate::gate::{GateAssets, spawn_gate, toggle_gate_at};
+use crate::divert::{Divert, DivertAssets, DivertDirection, spawn_divert, toggle_divert_at};
+use crate::gate::{Gate, GateAssets, spawn_gate, toggle_gate_at};
 use crate::source::{SourceAssets, spawn_source};
 
 pub const PALETTE_WIDTH: f32 = 120.0;
@@ -14,13 +15,25 @@ const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 pub enum Tool {
     CarrierSource,
     Gate,
+    DivertUp,
+    DivertDown,
 }
+
+/// Ordine dei bottoni nella barra.
+const TOOLS: [Tool; 4] = [
+    Tool::CarrierSource,
+    Tool::Gate,
+    Tool::DivertUp,
+    Tool::DivertDown,
+];
 
 impl Tool {
     fn label(self) -> &'static str {
         match self {
             Tool::CarrierSource => "Sorgente",
             Tool::Gate => "Gate",
+            Tool::DivertUp => "Divert su",
+            Tool::DivertDown => "Divert giu'",
         }
     }
 }
@@ -65,7 +78,7 @@ fn setup_palette(mut commands: Commands) {
             BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
         ))
         .with_children(|palette| {
-            for tool in [Tool::CarrierSource, Tool::Gate] {
+            for tool in TOOLS {
                 palette.spawn((
                     Button,
                     Node {
@@ -118,16 +131,21 @@ fn highlight_selected_tool(
     }
 }
 
-/// Clic nell'area di lavoro: piazza lo strumento attivo. Fa eccezione il clic
-/// su un gate gia' esistente, che ne commuta lo stato invece di sovrapporne
-/// un altro: e' l'unico modo per aprire e chiudere il flusso.
+/// Clic nell'area di lavoro: piazza lo strumento attivo. Fanno eccezione i clic
+/// su un gate o su un divert gia' esistenti, che ne commutano lo stato invece di
+/// sovrapporne un altro: e' l'unico modo per accenderli e spegnerli.
 fn place_selected_tool(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut gates: Query<(&mut crate::gate::Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut gates: Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>), Without<Divert>>,
+    mut diverts: Query<
+        (&mut Divert, &Transform, &mut MeshMaterial2d<ColorMaterial>),
+        Without<Gate>,
+    >,
     gate_assets: Res<GateAssets>,
+    divert_assets: Res<DivertAssets>,
     source_assets: Res<SourceAssets>,
     selected: Res<SelectedTool>,
 ) {
@@ -153,12 +171,24 @@ fn place_selected_tool(
         return;
     }
 
-    if toggle_gate_at(position, &mut gates, &gate_assets) {
+    if toggle_gate_at(position, &mut gates, &gate_assets)
+        || toggle_divert_at(position, &mut diverts, &divert_assets)
+    {
         return;
     }
 
+    let position = position.extend(1.0);
     match selected.0 {
-        Tool::CarrierSource => spawn_source(&mut commands, &source_assets, position.extend(1.0)),
-        Tool::Gate => spawn_gate(&mut commands, &gate_assets, position.extend(1.0)),
+        Tool::CarrierSource => spawn_source(&mut commands, &source_assets, position),
+        Tool::Gate => spawn_gate(&mut commands, &gate_assets, position),
+        Tool::DivertUp => {
+            spawn_divert(&mut commands, &divert_assets, position, DivertDirection::Up)
+        }
+        Tool::DivertDown => spawn_divert(
+            &mut commands,
+            &divert_assets,
+            position,
+            DivertDirection::Down,
+        ),
     }
 }
