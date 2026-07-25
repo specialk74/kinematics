@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
+use bevy::window::{CursorIcon, SystemCursorIcon};
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::Carrier;
@@ -315,6 +316,7 @@ impl Plugin for EditorPlugin {
                 (
                     select_tool,
                     highlight_selected_tool,
+                    follow_tool_with_cursor,
                     update_ghost,
                     handle_layout_buttons,
                     show_save_outcome,
@@ -442,6 +444,36 @@ pub fn button_label(text: &str) -> (Text, TextFont, TextColor) {
         },
         TextColor(Color::WHITE),
     )
+}
+
+/// Il cursore dice in che modo si e' senza doverlo andare a leggere nella barra.
+/// Si usano solo i cursori di sistema: quelli disegnati a mano non sarebbero
+/// coerenti con il resto della scrivania dell'utente, e soprattutto non
+/// seguirebbero il tema e la scala di chi usa il programma.
+fn follow_tool_with_cursor(
+    mut commands: Commands,
+    selected: Res<SelectedTool>,
+    windows: Query<Entity, With<Window>>,
+) {
+    if !selected.is_changed() {
+        return;
+    }
+
+    let icon = match selected.0 {
+        // La manina aperta e' il cursore di sistema per "questo si afferra e si
+        // trascina", che e' proprio quello che fa il modo Sposta.
+        EditorTool::Pan => CursorIcon::System(SystemCursorIcon::Grab),
+        // Il divieto: fra i cursori standard non esiste una X, e questo e' il
+        // piu' vicino come significato. Si preferisce a NoDrop perche' sui tre
+        // sistemi e' identico a lui tranne su Linux, dove pero' "not-allowed"
+        // c'e' in ogni tema mentre "no-drop" in qualcuno manca.
+        EditorTool::Erase => CursorIcon::System(SystemCursorIcon::NotAllowed),
+        _ => CursorIcon::default(),
+    };
+
+    for window in windows.iter() {
+        commands.entity(window).insert(icon.clone());
+    }
 }
 
 fn setup_ghost_material(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
