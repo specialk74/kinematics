@@ -4,6 +4,7 @@ use rand::prelude::*;
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
+pub const CARRIER_SIZE: f32 = 34.0;
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
 
@@ -79,8 +80,26 @@ pub fn tick_carrier_spawn_timer(mut timer: ResMut<CarrierSpawnTimer>, time: Res<
     timer.tick(time.delta());
 }
 
-fn spawn_carrier(mut commands: Commands, timer: Res<CarrierSpawnTimer>) {
+fn spawn_carrier(
+    mut commands: Commands,
+    timer: Res<CarrierSpawnTimer>,
+    carriers: Query<&Transform, With<Carrier>>,
+) {
     if !timer.is_finished() {
+        return;
+    }
+
+    let spawn = Vec3 {
+        x: WIDTH as f32 / 2.0 - 50.0,
+        y: 0.0,
+        z: 0.0,
+    };
+
+    // Non far entrare un carrier sopra a uno ancora fermo in coda all'ingresso.
+    if carriers
+        .iter()
+        .any(|transform| transform.translation.distance(spawn) < CARRIER_SIZE)
+    {
         return;
     }
 
@@ -92,11 +111,7 @@ fn spawn_carrier(mut commands: Commands, timer: Res<CarrierSpawnTimer>) {
                 font_size: 50.0,
                 ..default()
             },
-            Transform::from_translation(Vec3 {
-                x: WIDTH as f32 / 2.0 - 50.0,
-                y: 0.0,
-                z: 0.0,
-            }),
+            Transform::from_translation(spawn),
             TextColor(Color::srgb(1.0, 0.0, 1.0)),
             Carrier(CarrierType::WithTube),
             children![Tube],
@@ -108,34 +123,61 @@ fn spawn_carrier(mut commands: Commands, timer: Res<CarrierSpawnTimer>) {
                 font_size: 50.0,
                 ..default()
             },
-            Transform::from_translation(Vec3 {
-                x: WIDTH as f32 / 2.0 - 50.0,
-                y: 0.0,
-                z: 0.0,
-            }),
+            Transform::from_translation(spawn),
             TextColor(Color::srgb(1.0, 1.0, 0.0)),
             Carrier(CarrierType::Empty),
         ));
     }
 }
 
-fn move_carrier(time: Res<Time>, query: Query<(&Carrier, &mut Transform)>) {
-    for (carrier, mut transform) in query {
-        if carrier.0 == CarrierType::WithTube {
-            let pos = transform.translation.x.abs();
-            //println!("pos: {pos}");
-            if pos < 16.0 {
-                transform.translation.y += BELT_SPEED * time.delta_secs();
-                transform.translation.x -= CARRIER_DIVERT_SPEED * time.delta_secs();
-            } else if transform.translation.x < -300.0 && transform.translation.x > -(300.0 + 32.0)
-            {
-                transform.translation.y -= BELT_SPEED * time.delta_secs();
-                transform.translation.x -= CARRIER_DIVERT_SPEED * time.delta_secs();
-            } else {
-                transform.translation.x -= BELT_SPEED * time.delta_secs();
-            }
+fn carrier_velocity(carrier: &Carrier, translation: Vec3) -> Vec3 {
+    if carrier.0 == CarrierType::WithTube {
+        let pos = translation.x.abs();
+        if pos < 16.0 {
+            Vec3::new(-CARRIER_DIVERT_SPEED, BELT_SPEED, 0.0)
+        } else if translation.x < -300.0 && translation.x > -(300.0 + 32.0) {
+            Vec3::new(-CARRIER_DIVERT_SPEED, -BELT_SPEED, 0.0)
         } else {
-            transform.translation.x -= BELT_SPEED * time.delta_secs();
+            Vec3::new(-BELT_SPEED, 0.0, 0.0)
+        }
+    } else {
+        Vec3::new(-BELT_SPEED, 0.0, 0.0)
+    }
+}
+
+fn move_carrier(time: Res<Time>, mut query: Query<(Entity, &Carrier, &mut Transform)>) {
+    let delta_secs = time.delta_secs();
+
+    // Si risolve un carrier alla volta partendo da quello piu' avanti sul nastro:
+    // chi si ferma deve bloccare a cascata tutti quelli che ha dietro.
+    let mut belt: Vec<(Entity, Vec3, Vec3)> = query
+        .iter()
+        .map(|(entity, carrier, transform)| {
+            let translation = transform.translation;
+            (
+                entity,
+                translation,
+                carrier_velocity(carrier, translation) * delta_secs,
+            )
+        })
+        .collect();
+    belt.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
+
+    let mut resolved: Vec<(Entity, Vec3)> = Vec::with_capacity(belt.len());
+    for (entity, translation, step) in belt {
+        let candidate = translation + step;
+        // Il passo viene annullato solo se avvicina il carrier a uno gia' troppo
+        // vicino: cosi' chi e' sovrapposto puo' comunque allontanarsi.
+        let blocked = resolved.iter().any(|(_, ahead)| {
+            let gap = candidate.distance(*ahead);
+            gap < CARRIER_SIZE && gap < translation.distance(*ahead)
+        });
+        resolved.push((entity, if blocked { translation } else { candidate }));
+    }
+
+    for (entity, translation) in resolved {
+        if let Ok((_, _, mut transform)) = query.get_mut(entity) {
+            transform.translation = translation;
         }
     }
 }
