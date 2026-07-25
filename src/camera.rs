@@ -1,6 +1,10 @@
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
+use crate::editor::{EditorTool, SelectedTool, pointer_over_ui};
+
+/// Vista di partenza, quella a cui riporta il pulsante di reset.
+const DEFAULT_ZOOM: f32 = 1.0;
 /// Quanto stringe o allarga un singolo scatto di rotella.
 const ZOOM_STEP: f32 = 1.15;
 /// La scala e' quanto mondo entra in un pixel: piu' e' piccola, piu' si e'
@@ -12,17 +16,114 @@ const MAX_ZOOM: f32 = 2.0;
 /// questo fattore lo zoom da trackpad sarebbe ingestibile.
 const PIXELS_PER_STEP: f32 = 50.0;
 
+/// Vero mentre e' in corso un trascinamento della vista. Serve ricordarlo:
+/// altrimenti il clic che seleziona "Sposta" nella barra farebbe partire subito
+/// una trascinata, visto che il tasto e' gia' premuto.
+#[derive(Resource, Default)]
+struct Panning(bool);
+
+#[derive(Component)]
+struct ResetViewButton;
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera)
-            .add_systems(Update, zoom_with_ctrl_wheel);
+        app.init_resource::<Panning>()
+            .add_systems(Startup, (spawn_camera, setup_reset_button))
+            .add_systems(Update, (zoom_with_ctrl_wheel, pan_view, reset_view));
     }
 }
 
 fn spawn_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
+}
+
+fn setup_reset_button(mut commands: Commands) {
+    commands.spawn((
+        Button,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            // Alla sinistra del play/pausa, che e' largo 90 e sta a 12 dal bordo.
+            right: Val::Px(110.0),
+            width: Val::Px(90.0),
+            height: Val::Px(36.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.20, 0.20, 0.24)),
+        ResetViewButton,
+        children![(
+            Text::new("Reset vista"),
+            TextFont {
+                font_size: 14.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        )],
+    ));
+}
+
+/// Riporta la vista a com'era all'avvio: zoom di partenza e layout centrato.
+fn reset_view(
+    buttons: Query<&Interaction, (Changed<Interaction>, With<ResetViewButton>)>,
+    mut camera: Query<(&mut Projection, &mut Transform), With<Camera2d>>,
+) {
+    if !buttons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+
+    let Ok((mut projection, mut transform)) = camera.single_mut() else {
+        return;
+    };
+
+    if let Projection::Orthographic(orthographic) = projection.as_mut() {
+        orthographic.scale = DEFAULT_ZOOM;
+    }
+
+    // La z della camera decide cosa inquadra: si tocca solo il piano.
+    transform.translation.x = 0.0;
+    transform.translation.y = 0.0;
+}
+
+/// Trascinamento della vista col tasto sinistro, quando e' attivo il modo
+/// "Sposta". La vista segue il mouse, quindi la camera va nel verso opposto.
+fn pan_view(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut motion: MessageReader<MouseMotion>,
+    selected: Res<SelectedTool>,
+    ui_interactions: Query<&Interaction>,
+    mut panning: ResMut<Panning>,
+    mut camera: Query<(&Projection, &mut Transform), With<Camera2d>>,
+) {
+    let dragged: Vec2 = motion.read().map(|motion| motion.delta).sum();
+
+    if mouse.just_pressed(MouseButton::Left) {
+        panning.0 = selected.0 == EditorTool::Pan && !pointer_over_ui(&ui_interactions);
+    }
+    if mouse.just_released(MouseButton::Left) {
+        panning.0 = false;
+    }
+
+    if !panning.0 || dragged == Vec2::ZERO {
+        return;
+    }
+
+    let Ok((projection, mut transform)) = camera.single_mut() else {
+        return;
+    };
+    let Projection::Orthographic(orthographic) = projection else {
+        return;
+    };
+
+    // La y dello schermo cresce verso il basso, quella del mondo verso l'alto.
+    let world = Vec2::new(-dragged.x, dragged.y) * orthographic.scale;
+    transform.translation += world.extend(0.0);
 }
 
 /// Ctrl + rotella. Lo zoom e' centrato sul puntatore: il punto del mondo che

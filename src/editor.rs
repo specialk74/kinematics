@@ -29,9 +29,6 @@ pub enum Tool {
     Atr,
 }
 
-/// Ordine dei bottoni nella barra.
-const TOOLS: [Tool; 4] = [Tool::CarrierSource, Tool::Gate, Tool::Divert, Tool::Atr];
-
 impl Tool {
     fn label(self) -> &'static str {
         match self {
@@ -43,18 +40,46 @@ impl Tool {
     }
 }
 
-/// Strumento attivo: il prossimo clic nella scena piazza questo oggetto.
+/// Cosa fa il prossimo clic nella scena. `Pan` non e' un oggetto piazzabile, per
+/// questo sta qui e non in `Tool`: quell'enum e' il vocabolario del file di
+/// layout, e nel file non puo' finire qualcosa che non e' un oggetto.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EditorTool {
+    /// Nessun oggetto: il trascinamento sposta la vista.
+    Pan,
+    Place(Tool),
+}
+
+impl EditorTool {
+    fn label(self) -> &'static str {
+        match self {
+            EditorTool::Pan => "Sposta",
+            EditorTool::Place(tool) => tool.label(),
+        }
+    }
+}
+
+/// Ordine dei bottoni nella barra.
+const MODES: [EditorTool; 5] = [
+    EditorTool::Pan,
+    EditorTool::Place(Tool::CarrierSource),
+    EditorTool::Place(Tool::Gate),
+    EditorTool::Place(Tool::Divert),
+    EditorTool::Place(Tool::Atr),
+];
+
+/// Modo attivo.
 #[derive(Resource)]
-pub struct SelectedTool(pub Tool);
+pub struct SelectedTool(pub EditorTool);
 
 impl Default for SelectedTool {
     fn default() -> Self {
-        SelectedTool(Tool::CarrierSource)
+        SelectedTool(EditorTool::Place(Tool::CarrierSource))
     }
 }
 
 #[derive(Component)]
-struct ToolButton(Tool);
+struct ToolButton(EditorTool);
 
 /// I due comandi sul file di layout, in fondo alla barra.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -82,6 +107,15 @@ struct Ghost;
 #[derive(Resource)]
 struct GhostMaterial(Handle<ColorMaterial>);
 
+/// Vero se il puntatore e' su un elemento dell'interfaccia. I bottoni
+/// galleggiano sopra la scena (play/pausa e reset in alto a destra), quindi non
+/// basta escludere la barra: se il mouse e' su un bottone, quel clic e' suo.
+pub fn pointer_over_ui(ui_interactions: &Query<&Interaction>) -> bool {
+    ui_interactions
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+}
+
 /// Cella della griglia sotto il mouse, se il mouse e' sull'area di lavoro.
 /// La usano sia l'anteprima sia il piazzamento: e' cosi' che l'oggetto finisce
 /// per forza dove l'anteprima l'aveva mostrato.
@@ -90,12 +124,7 @@ fn cursor_cell(
     camera_query: &Query<(&Camera, &GlobalTransform)>,
     ui_interactions: &Query<&Interaction>,
 ) -> Option<IVec2> {
-    // I bottoni galleggiano sopra la scena (play/pausa in alto a destra), quindi
-    // non basta escludere la barra: se il mouse e' su un bottone quel clic e' suo.
-    if ui_interactions
-        .iter()
-        .any(|interaction| *interaction != Interaction::None)
-    {
+    if pointer_over_ui(ui_interactions) {
         return None;
     }
 
@@ -155,12 +184,12 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
             BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
         ))
         .with_children(|palette| {
-            for tool in TOOLS {
+            for mode in MODES {
                 palette.spawn((
                     button_node(),
                     BackgroundColor(BUTTON_IDLE),
-                    ToolButton(tool),
-                    children![button_label(tool.label())],
+                    ToolButton(mode),
+                    children![button_label(mode.label())],
                 ));
             }
 
@@ -249,14 +278,23 @@ fn update_ghost(
     ui_interactions: Query<&Interaction>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
-    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+    // In modo "Sposta" non si piazza niente, quindi non c'e' niente da mostrare.
+    let target = match (
+        selected.0,
+        cursor_cell(&windows, &camera_query, &ui_interactions),
+    ) {
+        (EditorTool::Place(tool), Some(cell)) => Some((tool, cell)),
+        _ => None,
+    };
+
+    let Some((tool, cell)) = target else {
         if let Ok((_, mut visibility, _)) = ghost.single_mut() {
             *visibility = Visibility::Hidden;
         }
         return;
     };
 
-    let (mesh, rotation) = tool_shape(selected.0, &source_assets, &gate_assets, &divert_assets);
+    let (mesh, rotation) = tool_shape(tool, &source_assets, &gate_assets, &divert_assets);
     let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
         .with_rotation(rotation);
 
@@ -328,11 +366,15 @@ fn place_selected_tool(
         return;
     }
 
-    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+    // In modo "Sposta" il tasto sinistro serve a trascinare la vista: qui non
+    // deve succedere niente, ne' piazzare ne' accendere.
+    let EditorTool::Place(tool) = selected.0 else {
         return;
     };
 
-    let tool = selected.0;
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+        return;
+    };
 
     if let Some((entity, occupant)) = placed
         .iter()
