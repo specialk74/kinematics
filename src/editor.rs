@@ -2,7 +2,6 @@ use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
 use serde::{Deserialize, Serialize};
 
-use crate::WORK_AREA_LEFT;
 use crate::carrier::Carrier;
 use crate::divert::{self, Divert, DivertAssets, DivertKind};
 use crate::gate::{self, Gate, GateAssets};
@@ -100,6 +99,15 @@ impl LayoutAction {
 #[derive(Component)]
 struct LayoutButton(LayoutAction);
 
+/// Spostamento sotto il quale una pressione conta come clic e non come
+/// trascinata: serve a non commutare un oggetto quando ci si appoggia sopra per
+/// spostare la vista.
+const CLICK_SLOP: f32 = 4.0;
+
+/// Dove si trovava il puntatore quando e' stato premuto il tasto.
+#[derive(Resource, Default)]
+struct PressOrigin(Option<Vec2>);
+
 /// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse ora.
 #[derive(Component)]
 struct Ghost;
@@ -130,11 +138,28 @@ fn cursor_cell(
 
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
+
+    // Sulla barra degli strumenti non si piazza niente. Il confronto e' sullo
+    // schermo e non sul mondo: con lo zoom e lo spostamento della vista la barra
+    // copre ogni volta una porzione diversa di mondo, quindi un confine in
+    // coordinate mondo smetterebbe di corrispondere alla barra che si vede.
+    if cursor.x < PALETTE_WIDTH {
+        return None;
+    }
+
     let (camera, camera_transform) = camera_query.single().ok()?;
     let position = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
 
-    // Sulla barra degli strumenti non si piazza niente.
-    (position.x >= WORK_AREA_LEFT).then(|| grid::cell(position))
+    Some(grid::cell(position))
+}
+
+/// Accende o spegne l'oggetto, qualunque dei due tipi commutabili sia.
+fn toggle_object(entity: Entity, gates: &mut Query<&mut Gate>, diverts: &mut Query<&mut Divert>) {
+    if let Ok(mut gate) = gates.get_mut(entity) {
+        gate.active = !gate.active;
+    } else if let Ok(mut divert) = diverts.get_mut(entity) {
+        divert.active = !divert.active;
+    }
 }
 
 fn tool_shape(
@@ -156,6 +181,7 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
+            .init_resource::<PressOrigin>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
             .add_systems(
                 Update,
@@ -164,6 +190,7 @@ impl Plugin for EditorPlugin {
                     highlight_selected_tool,
                     update_ghost,
                     place_selected_tool,
+                    toggle_by_click,
                     handle_layout_buttons,
                 ),
             );
@@ -384,11 +411,7 @@ fn place_selected_tool(
         // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
         // aggiorna il modulo dell'oggetto guardando lo stato.
         if occupant == tool {
-            if let Ok(mut gate) = gates.get_mut(entity) {
-                gate.active = !gate.active;
-            } else if let Ok(mut divert) = diverts.get_mut(entity) {
-                divert.active = !divert.active;
-            }
+            toggle_object(entity, &mut gates, &mut diverts);
             return;
         }
 
@@ -396,6 +419,58 @@ fn place_selected_tool(
     }
 
     place_in_cell(&mut commands, tool, cell);
+}
+
+/// In modo "Sposta" il tasto sinistro trascina la vista, ma una pressione che
+/// non si sposta e' un clic: serve ad accendere e spegnere gli oggetti senza
+/// dover tornare allo strumento con cui erano stati piazzati.
+fn toggle_by_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: Query<&Interaction>,
+    selected: Res<SelectedTool>,
+    placed: Query<(Entity, &Placed)>,
+    mut gates: Query<&mut Gate>,
+    mut diverts: Query<&mut Divert>,
+    mut press: ResMut<PressOrigin>,
+) {
+    let cursor = windows
+        .single()
+        .ok()
+        .and_then(|window| window.cursor_position());
+
+    if mouse.just_pressed(MouseButton::Left) {
+        press.0 = cursor;
+    }
+
+    if !mouse.just_released(MouseButton::Left) {
+        return;
+    }
+
+    let Some(origin) = press.0.take() else {
+        return;
+    };
+    if selected.0 != EditorTool::Pan {
+        return;
+    }
+
+    // Se il puntatore si e' mosso, quella era una trascinata della vista.
+    let Some(cursor) = cursor else {
+        return;
+    };
+    if origin.distance(cursor) > CLICK_SLOP {
+        return;
+    }
+
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+        return;
+    };
+    let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) else {
+        return;
+    };
+
+    toggle_object(entity, &mut gates, &mut diverts);
 }
 
 /// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in

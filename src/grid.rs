@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 
 use crate::divert::LANE_HEIGHT;
-use crate::{HEIGTH, WIDTH, WORK_AREA_LEFT};
 
 /// Passo della griglia. Coincide col dislivello fra le corsie, cosi' la corsia
 /// deviata cade esattamente una cella piu' su di quella principale.
@@ -20,9 +19,18 @@ pub struct GridPlugin;
 impl Plugin for GridPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(BACKGROUND_COLOR))
-            .add_systems(Startup, draw_grid);
+            .init_resource::<DrawnExtent>()
+            .add_systems(Update, redraw_grid);
     }
 }
+
+/// Righe e colonne attualmente disegnate. Serve a ridisegnare solo quando la
+/// vista scopre celle nuove, invece che a ogni frame.
+#[derive(Resource, Default, PartialEq, Eq)]
+struct DrawnExtent(Option<(IVec2, IVec2)>);
+
+#[derive(Component)]
+struct GridLine;
 
 /// Cella che contiene il punto.
 pub fn cell(position: Vec2) -> IVec2 {
@@ -47,23 +55,73 @@ fn boundaries_within(from: f32, to: f32) -> std::ops::RangeInclusive<i32> {
     first..=last
 }
 
-fn draw_grid(mut commands: Commands) {
-    let right = WIDTH as f32 / 2.0;
-    let top = HEIGTH as f32 / 2.0;
-    let area_width = right - WORK_AREA_LEFT;
-    let area_center_x = (WORK_AREA_LEFT + right) / 2.0;
+/// Riquadro di mondo inquadrato dalla camera, in coordinate mondo.
+fn visible_rect(window: &Window, camera: &Transform, scale: f32) -> Rect {
+    let half = Vec2::new(window.width(), window.height()) / 2.0 * scale;
+    let centre = camera.translation.truncate();
 
-    for n in boundaries_within(WORK_AREA_LEFT, right) {
+    Rect::from_corners(centre - half, centre + half)
+}
+
+/// Ridisegna la griglia in modo che copra sempre quello che si vede: a
+/// schermo intero, dopo uno zoom o dopo uno spostamento della vista. Il reticolo
+/// non ha quindi un bordo, se non quello della finestra.
+fn redraw_grid(
+    mut commands: Commands,
+    windows: Query<&Window>,
+    camera: Query<(&Transform, &Projection), With<Camera2d>>,
+    lines: Query<Entity, With<GridLine>>,
+    mut drawn: ResMut<DrawnExtent>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok((transform, projection)) = camera.single() else {
+        return;
+    };
+    let Projection::Orthographic(orthographic) = projection else {
+        return;
+    };
+
+    let visible = visible_rect(window, transform, orthographic.scale);
+    let columns = boundaries_within(visible.min.x, visible.max.x);
+    let rows = boundaries_within(visible.min.y, visible.max.y);
+
+    let extent = DrawnExtent(Some((
+        IVec2::new(*columns.start(), *rows.start()),
+        IVec2::new(*columns.end(), *rows.end()),
+    )));
+    if *drawn == extent {
+        return;
+    }
+    *drawn = extent;
+
+    for line in lines.iter() {
+        commands.entity(line).despawn();
+    }
+
+    // Le linee arrivano fino ai bordi della griglia disegnata, non a quelli
+    // della finestra: cosi' restano valide anche mentre la vista scivola, finche'
+    // non entrano in gioco celle nuove.
+    let (left, right) = (boundary(*columns.start()), boundary(*columns.end()));
+    let (bottom, top) = (boundary(*rows.start()), boundary(*rows.end()));
+    // Lo spessore e' in pixel di schermo: senza questa correzione, zoomando, le
+    // linee diventerebbero bande larghe.
+    let thickness = LINE_THICKNESS * orthographic.scale;
+
+    for column in columns {
         commands.spawn((
-            Sprite::from_color(GRID_COLOR, Vec2::new(LINE_THICKNESS, HEIGTH as f32)),
-            Transform::from_xyz(boundary(n), 0.0, GRID_Z),
+            Sprite::from_color(GRID_COLOR, Vec2::new(thickness, top - bottom)),
+            Transform::from_xyz(boundary(column), (bottom + top) / 2.0, GRID_Z),
+            GridLine,
         ));
     }
 
-    for n in boundaries_within(-top, top) {
+    for row in rows {
         commands.spawn((
-            Sprite::from_color(GRID_COLOR, Vec2::new(area_width, LINE_THICKNESS)),
-            Transform::from_xyz(area_center_x, boundary(n), GRID_Z),
+            Sprite::from_color(GRID_COLOR, Vec2::new(right - left, thickness)),
+            Transform::from_xyz((left + right) / 2.0, boundary(row), GRID_Z),
+            GridLine,
         ));
     }
 }
