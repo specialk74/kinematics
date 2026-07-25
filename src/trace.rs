@@ -159,6 +159,11 @@ struct ScrubBar;
 #[derive(Component)]
 struct ScrubFill;
 
+/// A che punto si e' nella registrazione, in secondi. La barra da sola dice
+/// "circa a meta'": per ritrovare un istante serve un numero.
+#[derive(Component)]
+struct ScrubTime;
+
 #[derive(Component)]
 struct ReplayButton;
 
@@ -227,15 +232,33 @@ fn setup_trace_buttons(mut commands: Commands) {
         // Nasce nascosta: senza una registrazione in corso non ha niente da dire.
         Visibility::Hidden,
         ScrubBar,
-        children![(
-            Node {
-                width: Val::Percent(0.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            BackgroundColor(REPLAYING_COLOR),
-            ScrubFill,
-        )],
+        children![
+            (
+                Node {
+                    width: Val::Percent(0.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(REPLAYING_COLOR),
+                ScrubFill,
+            ),
+            // Fuori dal flusso, altrimenti spingerebbe di lato il riempimento.
+            (
+                Text::new(""),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(8.0),
+                    top: Val::Px(3.0),
+                    ..default()
+                },
+                ScrubTime,
+            ),
+        ],
     ));
 }
 
@@ -260,6 +283,7 @@ fn scrub(
         With<ScrubBar>,
     >,
     mut fills: Query<&mut Node, With<ScrubFill>>,
+    mut times: Query<&mut Text, With<ScrubTime>>,
 ) {
     let replaying = *state.get() == SimulationState::Replaying;
 
@@ -272,7 +296,11 @@ fn scrub(
         Visibility::Hidden
     };
 
-    let Some(total) = replay.trace.as_ref().map(|trace| trace.frames.len()) else {
+    let Some((total, fps)) = replay
+        .trace
+        .as_ref()
+        .map(|trace| (trace.frames.len(), trace.fps))
+    else {
         return;
     };
     if total == 0 {
@@ -301,6 +329,13 @@ fn scrub(
 
     for mut fill in fills.iter_mut() {
         fill.width = Val::Percent(100.0 * replay.frame as f32 / total as f32);
+    }
+    for mut time in times.iter_mut() {
+        time.0 = format!(
+            "{:.1} / {:.1} s",
+            replay.frame as f32 / fps,
+            total as f32 / fps
+        );
     }
 }
 
@@ -411,6 +446,7 @@ fn toggle_replay(
     mut next_state: ResMut<NextState<SimulationState>>,
     mut notice: ResMut<ReplayNotice>,
     lists: Query<Entity, With<TraceList>>,
+    carriers: Query<Entity, With<Carrier>>,
 ) {
     if !pressed(&buttons) {
         return;
@@ -418,6 +454,12 @@ fn toggle_replay(
 
     if *state.get() == SimulationState::Replaying {
         replay.trace = None;
+        // I carrier rigiocati devono sparire: restando in scena, alla
+        // ripartenza la simulazione li adotterebbe come suoi e li farebbe
+        // proseguire da dove li ha lasciati la registrazione.
+        for entity in carriers.iter() {
+            commands.entity(entity).despawn();
+        }
         next_state.set(SimulationState::Paused);
         info!("riproduzione interrotta");
         return;
@@ -574,6 +616,11 @@ fn play_frames(
         None => {
             info!("riproduzione finita");
             replay.trace = None;
+            // Come per lo stop: quello che si vedeva era la registrazione, non
+            // la simulazione, e non deve sopravviverle.
+            for (entity, _) in carriers.iter() {
+                commands.entity(entity).despawn();
+            }
             next_state.set(SimulationState::Paused);
             return;
         }
