@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use rand::prelude::*;
 
 use crate::WORK_AREA_LEFT;
-use crate::divert::{DIVERT_ZONE_HALF_WIDTH, Divert};
+use crate::divert::Divert;
 use crate::gate::{Gate, blocks_circle};
 use crate::simulation::SimulationState;
 
@@ -191,7 +191,7 @@ fn move_carrier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::divert::{DivertKind, LANE_HEIGHT};
+    use crate::divert::{DIVERT_ZONE_HALF_WIDTH, DivertKind, LANE_HEIGHT};
     use crate::grid::GRID_STEP;
 
     const DELTA: f32 = 1.0 / 60.0;

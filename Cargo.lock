@@ -1797,6 +1797,8 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "rand 0.10.0",
+ "ron",
+ "serde",
 ]
 
 [[package]]

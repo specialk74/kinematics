@@ -1,22 +1,27 @@
 use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
+use serde::{Deserialize, Serialize};
 
 use crate::WORK_AREA_LEFT;
+use crate::carrier::Carrier;
 use crate::divert::{self, Divert, DivertAssets, DivertKind, spawn_divert, toggle_divert};
 use crate::gate::{self, Gate, GateAssets, spawn_gate, toggle_gate};
 use crate::grid;
+use crate::layout::{self, Layout, LayoutFile, LayoutObject};
 use crate::source::{self, SourceAssets, spawn_source};
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
 const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
+const CAPTION_COLOR: Color = Color::srgb(0.55, 0.55, 0.62);
 /// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto
 /// gia' piazzato, che e' proprio il caso in cui serve di piu'.
 const GHOST_Z: f32 = 2.0;
 
-/// Gli oggetti che si possono piazzare nella scena.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Gli oggetti che si possono piazzare nella scena. E' anche il vocabolario del
+/// file di layout, quindi rinominare una variante invalida i file gia' salvati.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Tool {
     CarrierSource,
     Gate,
@@ -50,6 +55,25 @@ impl Default for SelectedTool {
 
 #[derive(Component)]
 struct ToolButton(Tool);
+
+/// I due comandi sul file di layout, in fondo alla barra.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutAction {
+    Save,
+    Load,
+}
+
+impl LayoutAction {
+    fn label(self) -> &'static str {
+        match self {
+            LayoutAction::Save => "Salva",
+            LayoutAction::Load => "Carica",
+        }
+    }
+}
+
+#[derive(Component)]
+struct LayoutButton(LayoutAction);
 
 /// Oggetto appoggiato sulla griglia. Tiene la cella e lo strumento che l'ha
 /// creato: bastano a sapere cosa c'e' in una cella senza interrogare i singoli
@@ -107,12 +131,59 @@ fn tool_shape(
     }
 }
 
+/// Unico punto in cui nasce un oggetto della scena: lo usano sia il clic sia il
+/// caricamento da file, cosi' un layout ricaricato e' indistinguibile da uno
+/// costruito a mano.
+fn place_in_cell(
+    commands: &mut Commands,
+    tool: Tool,
+    cell: IVec2,
+    source_assets: &SourceAssets,
+    gate_assets: &GateAssets,
+    divert_assets: &DivertAssets,
+) {
+    let position = grid::cell_center(cell).extend(1.0);
+    let object = match tool {
+        Tool::CarrierSource => spawn_source(commands, source_assets, position),
+        Tool::Gate => spawn_gate(commands, gate_assets, position),
+        Tool::Divert => spawn_divert(commands, divert_assets, position, DivertKind::Divert),
+        Tool::Atr => spawn_divert(commands, divert_assets, position, DivertKind::Atr),
+    };
+
+    commands.entity(object).insert(Placed { tool, cell });
+}
+
+/// Ricostruisce in scena gli oggetti di un layout letto da file.
+fn spawn_layout(
+    commands: &mut Commands,
+    layout: &Layout,
+    source_assets: &SourceAssets,
+    gate_assets: &GateAssets,
+    divert_assets: &DivertAssets,
+) {
+    for object in &layout.objects {
+        place_in_cell(
+            commands,
+            object.tool,
+            IVec2::new(object.cell.0, object.cell.1),
+            source_assets,
+            gate_assets,
+            divert_assets,
+        );
+    }
+
+    info!("caricati {} oggetti", layout.objects.len());
+}
+
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
+            // In PostStartup: gli asset degli oggetti nascono in Startup e fra
+            // sistemi dello stesso schedule l'ordine non e' garantito.
+            .add_systems(PostStartup, load_layout_at_startup)
             .add_systems(
                 Update,
                 (
@@ -120,12 +191,13 @@ impl Plugin for EditorPlugin {
                     highlight_selected_tool,
                     update_ghost,
                     place_selected_tool,
+                    handle_layout_buttons,
                 ),
             );
     }
 }
 
-fn setup_palette(mut commands: Commands) {
+fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
     commands
         .spawn((
             Node {
@@ -141,27 +213,74 @@ fn setup_palette(mut commands: Commands) {
         .with_children(|palette| {
             for tool in TOOLS {
                 palette.spawn((
-                    Button,
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(40.0),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
+                    button_node(),
                     BackgroundColor(BUTTON_IDLE),
                     ToolButton(tool),
-                    children![(
-                        Text::new(tool.label()),
-                        TextFont {
-                            font_size: 14.0,
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
-                    )],
+                    children![button_label(tool.label())],
+                ));
+            }
+
+            // Spinge i comandi sul file in fondo, staccati dagli strumenti.
+            palette.spawn(Node {
+                flex_grow: 1.0,
+                ..default()
+            });
+
+            palette.spawn((
+                Text::new("File"),
+                TextFont {
+                    font_size: 10.0,
+                    ..default()
+                },
+                TextColor(CAPTION_COLOR),
+            ));
+            palette.spawn((
+                Text::new(layout_file.display_name()),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                Node {
+                    margin: UiRect::bottom(Val::Px(4.0)),
+                    ..default()
+                },
+            ));
+
+            for action in [LayoutAction::Save, LayoutAction::Load] {
+                palette.spawn((
+                    button_node(),
+                    BackgroundColor(BUTTON_IDLE),
+                    LayoutButton(action),
+                    children![button_label(action.label())],
                 ));
             }
         });
+}
+
+fn button_node() -> (Button, Node) {
+    (
+        Button,
+        Node {
+            width: Val::Percent(100.0),
+            height: Val::Px(40.0),
+            flex_shrink: 0.0,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+    )
+}
+
+fn button_label(text: &str) -> (Text, TextFont, TextColor) {
+    (
+        Text::new(text),
+        TextFont {
+            font_size: 14.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+    )
 }
 
 fn setup_ghost_material(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
@@ -291,13 +410,99 @@ fn place_selected_tool(
         commands.entity(entity).despawn();
     }
 
-    let position = grid::cell_center(cell).extend(1.0);
-    let object = match tool {
-        Tool::CarrierSource => spawn_source(&mut commands, &source_assets, position),
-        Tool::Gate => spawn_gate(&mut commands, &gate_assets, position),
-        Tool::Divert => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Divert),
-        Tool::Atr => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Atr),
-    };
+    place_in_cell(
+        &mut commands,
+        tool,
+        cell,
+        &source_assets,
+        &gate_assets,
+        &divert_assets,
+    );
+}
 
-    commands.entity(object).insert(Placed { tool, cell });
+/// Apre il layout passato sulla riga di comando. Un file che non si legge viene
+/// segnalato e basta: si parte a scena vuota, cosi' si puo' comunque costruirlo
+/// e salvarlo su quel nome.
+fn load_layout_at_startup(
+    mut commands: Commands,
+    layout_file: Res<LayoutFile>,
+    source_assets: Res<SourceAssets>,
+    gate_assets: Res<GateAssets>,
+    divert_assets: Res<DivertAssets>,
+) {
+    info!("file di layout: {}", layout_file.path);
+
+    if !layout_file.load_at_startup {
+        return;
+    }
+
+    match layout::load(&layout_file.path) {
+        Ok(layout) => spawn_layout(
+            &mut commands,
+            &layout,
+            &source_assets,
+            &gate_assets,
+            &divert_assets,
+        ),
+        Err(error) => error!("non riesco ad aprire {}: {error}", layout_file.path),
+    }
+}
+
+/// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in
+/// scena; il caricamento la sostituisce, carrier in volo compresi: lasciarli
+/// vivi vorrebbe dire vederli percorrere corsie che non esistono piu'.
+fn handle_layout_buttons(
+    mut commands: Commands,
+    buttons: Query<(&Interaction, &LayoutButton), Changed<Interaction>>,
+    placed: Query<(Entity, &Placed)>,
+    carriers: Query<Entity, With<Carrier>>,
+    layout_file: Res<LayoutFile>,
+    source_assets: Res<SourceAssets>,
+    gate_assets: Res<GateAssets>,
+    divert_assets: Res<DivertAssets>,
+) {
+    for (interaction, button) in buttons.iter() {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        match button.0 {
+            LayoutAction::Save => {
+                let layout = Layout {
+                    objects: placed
+                        .iter()
+                        .map(|(_, placed)| LayoutObject {
+                            tool: placed.tool,
+                            cell: (placed.cell.x, placed.cell.y),
+                        })
+                        .collect(),
+                };
+
+                match layout::save(&layout, &layout_file.path) {
+                    Ok(()) => info!("layout salvato in {}", layout_file.path),
+                    Err(error) => error!("salvataggio fallito: {error}"),
+                }
+            }
+
+            LayoutAction::Load => match layout::load(&layout_file.path) {
+                Ok(layout) => {
+                    for (entity, _) in placed.iter() {
+                        commands.entity(entity).despawn();
+                    }
+                    for entity in carriers.iter() {
+                        commands.entity(entity).despawn();
+                    }
+
+                    spawn_layout(
+                        &mut commands,
+                        &layout,
+                        &source_assets,
+                        &gate_assets,
+                        &divert_assets,
+                    );
+                }
+                Err(error) => error!("caricamento fallito: {error}"),
+            },
+        }
+    }
 }
