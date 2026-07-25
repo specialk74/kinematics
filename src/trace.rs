@@ -9,7 +9,7 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
-use crate::editor::{BUTTON_IDLE, PALETTE_WIDTH, button_label, top_button};
+use crate::editor::{BUTTON_IDLE, Layer, PALETTE_WIDTH, button_label, top_button};
 use crate::layout::{Layout, Placed, Switches, spawn_layout};
 use crate::piece::Facing;
 use crate::simulation::SimulationState;
@@ -51,7 +51,15 @@ pub struct TracedCarrier {
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct TraceFrame {
     pub carriers: Vec<TracedCarrier>,
+    /// Gli oggetti di linea, per cella.
     pub switches: Vec<((i32, i32), bool)>,
+    /// Quelli del piano di sotto, sempre per cella. Stanno in un elenco a parte
+    /// perche' un'antenna puo' condividere la cella con un oggetto di linea: in
+    /// un elenco solo le due voci avrebbero la stessa chiave e in riproduzione
+    /// non si saprebbe piu' quale stato appartiene a quale oggetto. Assente
+    /// nelle registrazioni fatte prima delle antenne, che restano leggibili.
+    #[serde(default)]
+    pub under: Vec<((i32, i32), bool)>,
 }
 
 /// Una registrazione completa. Contiene anche il layout, cosi' il file e' lo
@@ -178,29 +186,42 @@ struct TraceList;
 #[derive(Component)]
 struct TraceEntry(String);
 
+/// La registrazione vera e propria. Sta da sola perche' serve anche senza
+/// finestra: `--hide_gui --record` fa girare l'impianto e ne raccoglie le
+/// posizioni, che e' proprio il modo in cui si registra una sessione lunga.
 pub struct TracePlugin;
 
 impl Plugin for TracePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Recording>()
-            .init_resource::<Replay>()
+            .add_systems(Update, record_frames)
+            // Uscire mentre si registra non deve buttare via quello che si e'
+            // raccolto: senza finestra e' l'unico modo in cui la registrazione
+            // finisce, visto che si chiude con Ctrl+C.
+            .add_systems(Last, save_on_exit);
+    }
+}
+
+/// I comandi e la riproduzione. Vogliono tutti qualcosa da guardare o da
+/// premere, quindi vivono solo con la finestra.
+pub struct TraceVisualsPlugin;
+
+impl Plugin for TraceVisualsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<Replay>()
             .init_resource::<ReplayNotice>()
             .add_systems(Startup, setup_trace_buttons)
             .add_systems(
                 Update,
                 (
                     toggle_recording,
-                    record_frames,
                     toggle_replay,
                     play_frames.run_if(in_state(SimulationState::Replaying)),
                     choose_trace,
                     refresh_buttons,
                     scrub,
                 ),
-            )
-            // Chiudere la finestra mentre si registra non deve buttare via
-            // quello che si e' raccolto.
-            .add_systems(Last, save_on_exit);
+            );
     }
 }
 
@@ -388,6 +409,23 @@ fn stop_recording(recording: &mut Recording, placed: &Query<(&Placed, &Facing)>)
     }
 }
 
+/// Lo stato degli interruttori di un piano solo.
+fn switches_on(
+    layer: Layer,
+    placed: &Query<(Entity, &Placed)>,
+    switches: &Switches,
+) -> Vec<((i32, i32), bool)> {
+    placed
+        .iter()
+        .filter(|(_, placed)| placed.tool.layer() == layer)
+        .filter_map(|(entity, placed)| {
+            switches
+                .get(entity)
+                .map(|active| ((placed.cell.x, placed.cell.y), active))
+        })
+        .collect()
+}
+
 fn record_frames(
     time: Res<Time>,
     mut recording: ResMut<Recording>,
@@ -414,14 +452,8 @@ fn record_frames(
                 at: (transform.translation.x, transform.translation.y),
             })
             .collect(),
-        switches: placed
-            .iter()
-            .filter_map(|(entity, placed)| {
-                switches
-                    .get(entity)
-                    .map(|active| ((placed.cell.x, placed.cell.y), active))
-            })
-            .collect(),
+        switches: switches_on(Layer::Track, &placed, &switches),
+        under: switches_on(Layer::Under, &placed, &switches),
     };
 
     recording.frames.push(frame);
@@ -654,11 +686,25 @@ fn play_frames(
 
     // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
     // deve richiudersi anche qui, altrimenti la scena non spiega piu' la coda
-    // che si vede.
-    for ((x, y), active) in &frame.switches {
-        let cell = IVec2::new(*x, *y);
+    // che si vede. I due piani si ripristinano separatamente: e' l'unico modo di
+    // non confondere un'antenna con l'oggetto che le sta sopra.
+    restore(Layer::Track, &frame.switches, &placed, &mut switches);
+    restore(Layer::Under, &frame.under, &placed, &mut switches);
+}
 
-        if let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) {
+fn restore(
+    layer: Layer,
+    states: &[((i32, i32), bool)],
+    placed: &Query<(Entity, &Placed)>,
+    switches: &mut Switches,
+) {
+    for ((x, y), active) in states {
+        let cell = IVec2::new(*x, *y);
+        let found = placed
+            .iter()
+            .find(|(_, placed)| placed.cell == cell && placed.tool.layer() == layer);
+
+        if let Some((entity, _)) = found {
             switches.set(entity, *active);
         }
     }
@@ -759,6 +805,8 @@ mod tests {
                         at: (10.0, -20.0),
                     }],
                     switches: vec![((3, 0), true)],
+                    // Un'antenna accesa sotto quello stesso gate.
+                    under: vec![((3, 0), true)],
                 },
                 TraceFrame {
                     carriers: vec![TracedCarrier {
@@ -766,8 +814,12 @@ mod tests {
                         kind: CarrierType::WithTube,
                         at: (5.0, -20.0),
                     }],
-                    // Nel secondo istante il gate e' stato chiuso.
+                    // Nel secondo istante il gate e' stato chiuso, mentre
+                    // l'antenna sotto e' rimasta accesa: stessa cella, stati
+                    // diversi, ed e' il caso che un elenco solo non saprebbe
+                    // raccontare.
                     switches: vec![((3, 0), false)],
+                    under: vec![((3, 0), true)],
                 },
             ],
         }
@@ -785,6 +837,28 @@ mod tests {
     #[test]
     fn the_length_comes_from_the_number_of_moments() {
         assert_eq!(sample().seconds(), 2.0 / TRACE_FPS);
+    }
+
+    /// Un'antenna sotto un gate ha una vita sua: i due stati devono restare
+    /// distinguibili anche se la cella e' la stessa.
+    #[test]
+    fn an_antenna_keeps_its_own_state_under_an_object() {
+        let reread = from_ron(&to_ron(&sample()).expect("scrittura")).expect("rilettura");
+        let closed = &reread.frames[1];
+
+        assert_eq!(closed.switches, vec![((3, 0), false)], "il gate e' chiuso");
+        assert_eq!(closed.under, vec![((3, 0), true)], "l'antenna e' accesa");
+    }
+
+    /// Le registrazioni fatte prima delle antenne non hanno il piano di sotto e
+    /// devono continuare ad aprirsi.
+    #[test]
+    fn an_old_recording_without_the_lower_layer_still_loads() {
+        let old = "(fps: 20.0, layout: (objects: []), frames: [(carriers: [], switches: [((1, 2), true)])])";
+
+        let trace = from_ron(old).expect("rilettura");
+
+        assert!(trace.frames[0].under.is_empty());
     }
 
     /// Il file porta con se' l'impianto: senza, le coordinate sarebbero numeri

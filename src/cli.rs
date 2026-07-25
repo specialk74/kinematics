@@ -18,7 +18,10 @@ pub struct Options {
 
     /// Riproduce una registrazione invece di simulare. Il file porta con se'
     /// anche l'impianto, quindi non serve indicare un layout.
-    #[arg(long, value_name = "FILE")]
+    // Riprodurre serve a guardare cosa e' successo: senza finestra non
+    // resterebbe niente da guardare. La combinazione viene rifiutata subito
+    // invece di girare a vuoto.
+    #[arg(long, value_name = "FILE", conflicts_with = "hide_gui")]
     pub replay: Option<String>,
 
     /// Fa girare la simulazione senza finestra, fino a Ctrl+C.
@@ -55,6 +58,18 @@ mod tests {
 
         assert_eq!(options.replay.as_deref(), Some("registrazione-1.ron"));
         assert_eq!(parse(&[]).replay, None);
+    }
+
+    /// Registrare senza finestra ha senso: la simulazione gira lo stesso e il
+    /// file resta. Riprodurre senza finestra no, e viene detto invece di
+    /// lasciare il programma a girare per niente.
+    #[test]
+    fn replaying_without_a_window_is_refused_while_recording_is_not() {
+        assert!(Options::try_parse_from(["chapter1", "--hide_gui", "--record"]).is_ok());
+        assert!(
+            Options::try_parse_from(["chapter1", "--hide_gui", "--replay", "r.ron"]).is_err(),
+            "senza finestra non c'e' niente da guardare"
+        );
     }
 
     #[test]

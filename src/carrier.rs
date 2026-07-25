@@ -4,8 +4,9 @@ use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::divert::{Divert, LANE_HEIGHT};
-use crate::gate::{Gate, blocks_circle};
-use crate::piece::Facing;
+use crate::gate::{self, Gate};
+use crate::geometry::circle_touches_box;
+use crate::piece::{Facing, PIECE_SIZE};
 use crate::reverser::{Reverser, TURN_RADIUS};
 use crate::simulation::SimulationState;
 use crate::turner::Turner;
@@ -438,6 +439,21 @@ fn carrier_step(
     (straight, carrier.motion)
 }
 
+/// Un ostacolo fermo sulla scena: un rettangolo che i carrier non attraversano.
+/// Il gate ne occupa una striscia di lato, un ATR spento tutta la sua cella.
+#[derive(Clone, Copy, Debug)]
+pub struct Blocker {
+    pub centre: Vec3,
+    pub half: Vec2,
+}
+
+/// Vero se un cerchio di raggio `radius` centrato in `point` tocca l'ostacolo.
+/// Il raggio arriva da fuori: cosi' l'ostacolo non ha bisogno di sapere nulla
+/// di com'e' fatto un carrier.
+pub fn blocks(blocker: Blocker, point: Vec3, radius: f32) -> bool {
+    circle_touches_box(blocker.centre, blocker.half, point, radius)
+}
+
 /// Quello che serve sapere di un carrier per far avanzare un frame.
 pub struct Moving<'a> {
     pub carrier: &'a Carrier,
@@ -450,7 +466,7 @@ pub struct Moving<'a> {
 pub fn resolve_frame(
     belt: &[Moving],
     track: &Track,
-    blockers: &[Vec3],
+    blockers: &[Blocker],
     delta_secs: f32,
 ) -> Vec<(Vec3, Option<Motion>)> {
     let steps: Vec<(Vec3, Motion)> = belt
@@ -481,8 +497,8 @@ pub fn resolve_frame(
             // Chi lo stava gia' attraversando quando la strada si e' chiusa
             // finisce il transito invece di restare incastrato dentro l'ostacolo.
             let stopped = blockers.iter().any(|blocker| {
-                blocks_circle(*blocker, candidate, CARRIER_RADIUS)
-                    && !blocks_circle(*blocker, moving.position, CARRIER_RADIUS)
+                blocks(*blocker, candidate, CARRIER_RADIUS)
+                    && !blocks(*blocker, moving.position, CARRIER_RADIUS)
             });
 
             if queued || stopped {
@@ -497,7 +513,7 @@ pub fn resolve_frame(
 fn move_carrier(
     time: Res<Time>,
     mut query: Query<(Entity, &mut Carrier, &mut Transform)>,
-    gates: Query<(&Gate, &Transform), Without<Carrier>>,
+    gates: Query<(&Gate, &Facing, &Transform), Without<Carrier>>,
     diverts: Query<(&Divert, &Facing, &Transform), Without<Carrier>>,
     turners: Query<(&Turner, &Facing, &Transform), Without<Carrier>>,
     reversers: Query<(&Reverser, &Transform), Without<Carrier>>,
@@ -524,15 +540,20 @@ fn move_carrier(
 
     // Un gate acceso e un ATR spento fanno la stessa cosa al flusso: lo
     // fermano. Per il movimento sono la stessa lista.
-    let blockers: Vec<Vec3> = gates
+    let blockers: Vec<Blocker> = gates
         .iter()
-        .filter(|(gate, _)| gate.active)
-        .map(|(_, transform)| transform.translation)
+        .filter(|(gate, _, _)| gate.active)
+        .map(|(_, facing, transform)| gate::bar(transform.translation, facing.0))
+        // L'ATR spento chiude tutta la sua cella, non un lato: chi arriva non ha
+        // nessun modo di passare, ne' dritto ne' di lato.
         .chain(
             diverts
                 .iter()
                 .filter(|(divert, _, _)| divert.is_blocking())
-                .map(|(_, _, position)| *position),
+                .map(|(_, _, position)| Blocker {
+                    centre: *position,
+                    half: Vec2::splat(PIECE_SIZE / 2.0),
+                }),
         )
         .collect();
 
@@ -570,7 +591,9 @@ fn move_carrier(
 mod tests {
     use super::*;
     use crate::divert::{DIVERT_ZONE_HALF_WIDTH, DivertKind, LANE_HEIGHT};
+    use crate::gate;
     use crate::grid::GRID_STEP;
+    use crate::piece::{ANTENNA_OFFSET, ANTENNA_RADIUS};
 
     const DELTA: f32 = 1.0 / 60.0;
 
@@ -590,6 +613,14 @@ mod tests {
             carrier_id: 1,
             sample_id: None,
             motion: Motion::Straight(Heading::Left),
+        }
+    }
+
+    /// Un ostacolo che chiude tutta la cella: e' l'ATR spento.
+    fn cell_blocker(position: Vec3) -> Blocker {
+        Blocker {
+            centre: position,
+            half: Vec2::splat(PIECE_SIZE / 2.0),
         }
     }
 
@@ -884,7 +915,7 @@ mod tests {
                     position,
                 }];
 
-                resolve_frame(&belt, &track, &[atr_position], DELTA)
+                resolve_frame(&belt, &track, &[cell_blocker(atr_position)], DELTA)
             };
             position = resolved[0].0;
         }
@@ -893,6 +924,60 @@ mod tests {
             (position.y - LANE_HEIGHT).abs() < 0.01,
             "doveva completare il rientro fino alla corsia, invece e' a y = {}",
             position.y
+        );
+    }
+
+    /// Il motivo per cui il gate e' una sbarra e non un quadrato: il carrier che
+    /// ferma deve restare sopra l'antenna che sta al centro di quella cella, e
+    /// il successivo deve restarne fuori. Con il gate quadrato di prima si
+    /// fermavano entrambi mezza cella piu' in la', e a stare sull'antenna era il
+    /// secondo.
+    #[test]
+    fn the_carrier_a_gate_stops_comes_to_rest_over_the_antenna() {
+        let empty_track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[],
+        };
+        let cell = Vec3::ZERO;
+        let blockers = [gate::bar(cell, Heading::Left)];
+
+        let carrier = carrier(CarrierType::WithTube);
+        let mut positions = [
+            Vec3::new(3.0 * GRID_STEP, 0.0, 0.0),
+            Vec3::new(4.0 * GRID_STEP, 0.0, 0.0),
+        ];
+
+        for _ in 0..900 {
+            let resolved = {
+                let belt: Vec<Moving> = positions
+                    .iter()
+                    .map(|position| Moving {
+                        carrier: &carrier,
+                        position: *position,
+                    })
+                    .collect();
+
+                resolve_frame(&belt, &empty_track, &blockers, DELTA)
+            };
+            for (position, (resolved, _)) in positions.iter_mut().zip(resolved) {
+                *position = resolved;
+            }
+        }
+
+        // L'antenna della stessa cella, girata come il gate: sta dove il
+        // carrier si ferma, non al centro della cella.
+        let antenna = cell + (Heading::Left.as_vec() * ANTENNA_OFFSET).extend(0.0);
+        let first = positions[0].distance(antenna);
+        let second = positions[1].distance(antenna);
+
+        assert!(
+            first < 2.0,
+            "il carrier fermato deve stare sopra l'antenna: dista {first}"
+        );
+        assert!(
+            second > ANTENNA_RADIUS,
+            "quello dietro no, altrimenti non si saprebbe chi e' stato letto: dista {second}"
         );
     }
 
@@ -917,7 +1002,7 @@ mod tests {
                     position,
                 }];
 
-                resolve_frame(&belt, &empty_track, &[atr], DELTA)
+                resolve_frame(&belt, &empty_track, &[cell_blocker(atr)], DELTA)
             };
             position = resolved[0].0;
         }

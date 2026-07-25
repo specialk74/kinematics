@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use clap::Parser;
 
+mod antenna;
 mod camera;
 mod carrier;
 mod cli;
@@ -23,6 +24,7 @@ mod source;
 mod trace;
 mod turner;
 
+use antenna::AntennaVisualsPlugin;
 use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
 use cli::Options;
@@ -36,7 +38,7 @@ use piece::PiecePlugin;
 use reverser::ReverserVisualsPlugin;
 use simulation::{SimulationControlsPlugin, SimulationPlugin, SimulationState};
 use source::{SourcePlugin, SourceVisualsPlugin};
-use trace::{Replay, TracePlugin};
+use trace::{Replay, TracePlugin, TraceVisualsPlugin};
 use turner::TurnerVisualsPlugin;
 
 pub const WIDTH: u32 = 1024;
@@ -83,10 +85,11 @@ fn main() {
             SourceVisualsPlugin,
             GateVisualsPlugin,
             DivertVisualsPlugin,
-            TracePlugin,
+            TraceVisualsPlugin,
             DespawnerVisualsPlugin,
             TurnerVisualsPlugin,
             ReverserVisualsPlugin,
+            AntennaVisualsPlugin,
         ));
     }
 
@@ -95,6 +98,8 @@ fn main() {
     if options.record {
         app.add_systems(PostStartup, trace::start_recording);
     }
+    // La riproduzione ha bisogno della finestra, e infatti la riga di comando
+    // rifiuta la coppia con hide_gui: qui non ci si arriva mai senza interfaccia.
     if let Some(path) = options.replay.clone() {
         app.add_systems(
             PostStartup,
@@ -112,6 +117,8 @@ fn main() {
         CarrierPlugin,
         SourcePlugin,
         DespawnerPlugin,
+        // Anche senza finestra: registrare non ha bisogno di guardare.
+        TracePlugin,
     ))
     .run();
 }

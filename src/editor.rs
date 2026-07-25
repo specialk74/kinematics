@@ -31,6 +31,8 @@ pub enum Tool {
     #[serde(alias = "Riser")]
     Turner,
     Reverser,
+    /// Lettore sotto la linea. Non tocca il flusso: guarda e basta.
+    Antenna,
 }
 
 impl Tool {
@@ -43,8 +45,92 @@ impl Tool {
             Tool::Despawner => "Despawn",
             Tool::Turner => "Svolta",
             Tool::Reverser => "Inversione",
+            Tool::Antenna => "Antenna",
         }
     }
+
+    pub fn layer(self) -> Layer {
+        match self {
+            Tool::Antenna => Layer::Under,
+            _ => Layer::Track,
+        }
+    }
+}
+
+/// Su che piano vive un oggetto. Serve perche' l'antenna sta sotto la linea:
+/// non contende la cella agli altri, e una cella puo' benissimo avere un gate
+/// con un'antenna sotto. Due oggetti dello stesso piano invece si escludono,
+/// come e' sempre stato.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer {
+    /// Sulla linea: sorgenti, gate, deviatori, uscite.
+    Track,
+    /// Sotto la linea: ci passano sopra sia i carrier sia gli oggetti.
+    Under,
+}
+
+impl Layer {
+    /// Quota a cui nasce l'oggetto. I carrier viaggiano a zero, quindi il piano
+    /// di sotto deve stare in negativo per finire davvero sotto di loro.
+    pub fn z(self) -> f32 {
+        match self {
+            Layer::Track => 1.0,
+            Layer::Under => -1.0,
+        }
+    }
+}
+
+/// Chi occupa la cella su un certo piano. Il piazzamento guarda solo il proprio:
+/// appoggiare un'antenna sotto un gate non tocca il gate, e rimettere il gate
+/// non porta via l'antenna.
+fn occupant_on<'a>(
+    cell: IVec2,
+    layer: Layer,
+    objects: impl Iterator<Item = (Entity, &'a Placed)>,
+) -> Option<(Entity, Tool)> {
+    objects
+        .filter(|(_, placed)| placed.cell == cell && placed.tool.layer() == layer)
+        .map(|(entity, placed)| (entity, placed.tool))
+        .next()
+}
+
+/// L'oggetto che un clic in quel punto colpisce. Sulla figura dell'oggetto di
+/// linea il clic e' suo; altrove nella cella e' di quello che gli sta sotto, che
+/// li' e' scoperto e si vede. E' cosi' che si accende l'antenna al centro della
+/// cella di un gate, la cui sbarra occupa solo un lato.
+fn clicked_piece<'a, I>(point: Vec2, cell: IVec2, objects: impl Fn() -> I) -> Option<(Entity, Tool)>
+where
+    I: Iterator<Item = (Entity, &'a Placed, &'a Facing)>,
+{
+    let in_cell = |layer: Layer| {
+        objects().find(move |(_, placed, _)| placed.cell == cell && placed.tool.layer() == layer)
+    };
+    let named = |found: Option<(Entity, &Placed, &Facing)>| {
+        found.map(|(entity, placed, _)| (entity, placed.tool))
+    };
+
+    let track = in_cell(Layer::Track);
+    let on_the_figure = track.is_some_and(|(_, placed, facing)| {
+        piece::covers(placed.tool, *facing, grid::cell_center(cell), point)
+    });
+
+    if on_the_figure {
+        return named(track);
+    }
+
+    named(in_cell(Layer::Under).or(track))
+}
+
+/// L'oggetto in cima alla cella: quello di linea se c'e', altrimenti l'antenna
+/// sotto. E' quello che l'utente vede e quindi quello che crede di puntare.
+fn topmost<'a>(
+    cell: IVec2,
+    objects: impl Iterator<Item = (Entity, &'a Placed)>,
+) -> Option<(Entity, Tool)> {
+    objects
+        .filter(|(_, placed)| placed.cell == cell)
+        .max_by_key(|(_, placed)| placed.tool.layer() == Layer::Track)
+        .map(|(entity, placed)| (entity, placed.tool))
 }
 
 /// Cosa fa il prossimo clic nella scena. `Pan` non e' un oggetto piazzabile, per
@@ -58,6 +144,11 @@ pub enum EditorTool {
     /// merce di passaggio, non pezzi del layout.
     Erase,
     Place(Tool),
+    /// Gate e antenna in un colpo solo, girati allo stesso modo: l'antenna
+    /// finisce esattamente dove la sbarra ferma il carrier. Restano due oggetti
+    /// distinti, quindi si accendono e si spengono ognuno per conto suo, e nel
+    /// file salvato compaiono separati come sempre.
+    GateWithAntenna,
 }
 
 impl EditorTool {
@@ -66,12 +157,22 @@ impl EditorTool {
             EditorTool::Pan => "Sposta",
             EditorTool::Erase => "Cancella",
             EditorTool::Place(tool) => tool.label(),
+            EditorTool::GateWithAntenna => "Gate+Ant.",
+        }
+    }
+
+    /// Che cosa piazza questo strumento.
+    fn places(self) -> Vec<Tool> {
+        match self {
+            EditorTool::Pan | EditorTool::Erase => Vec::new(),
+            EditorTool::Place(tool) => vec![tool],
+            EditorTool::GateWithAntenna => vec![Tool::Gate, Tool::Antenna],
         }
     }
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 9] = [
+const MODES: [EditorTool; 11] = [
     EditorTool::Pan,
     EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
@@ -81,6 +182,8 @@ const MODES: [EditorTool; 9] = [
     EditorTool::Place(Tool::Despawner),
     EditorTool::Place(Tool::Turner),
     EditorTool::Place(Tool::Reverser),
+    EditorTool::Place(Tool::Antenna),
+    EditorTool::GateWithAntenna,
 ];
 
 /// Modo attivo.
@@ -167,6 +270,17 @@ fn cursor_cell(
     camera_query: &Query<(&Camera, &GlobalTransform)>,
     ui_interactions: &Query<&Interaction>,
 ) -> Option<IVec2> {
+    cursor_world(windows, camera_query, ui_interactions).map(grid::cell)
+}
+
+/// Il punto del mondo sotto il mouse. Serve a chi non si accontenta della cella:
+/// dentro una cella ci sono due oggetti sovrapposti, e per sapere quale si sta
+/// puntando bisogna guardare dove esattamente e' caduto il clic.
+fn cursor_world(
+    windows: &Query<&Window>,
+    camera_query: &Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: &Query<&Interaction>,
+) -> Option<Vec2> {
     if pointer_over_ui(ui_interactions) {
         return None;
     }
@@ -183,9 +297,8 @@ fn cursor_cell(
     }
 
     let (camera, camera_transform) = camera_query.single().ok()?;
-    let position = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
 
-    Some(grid::cell(position))
+    camera.viewport_to_world_2d(camera_transform, cursor).ok()
 }
 
 pub struct EditorPlugin;
@@ -361,19 +474,27 @@ fn update_ghost(
         cursor_cell(&windows, &camera_query, &ui_interactions),
     ) {
         (EditorTool::Place(tool), Some(cell)) if !replaying => Some((tool, cell)),
+        // Dello strumento doppio si mostra la sbarra: e' la parte che si vede.
+        (EditorTool::GateWithAntenna, Some(cell)) if !replaying => Some((Tool::Gate, cell)),
         _ => None,
     };
 
-    let Some((_, cell)) = target else {
+    let Some((tool, cell)) = target else {
         if let Ok((_, mut visibility, _)) = ghost.single_mut() {
             *visibility = Visibility::Hidden;
         }
         return;
     };
 
-    // Tutti gli oggetti sono quadrati uguali: l'anteprima mostra dove finira'
-    // il prossimo, non che aspetto avra'.
-    let mesh = piece::square(&shapes);
+    // Gli oggetti di linea sono quadrati tutti uguali, quindi per loro
+    // l'anteprima dice dove finira' il prossimo e non che aspetto avra'.
+    // L'antenna e' un cerchio, ed e' l'unica forma diversa: mostrarla quadrata
+    // sarebbe una promessa sbagliata.
+    let mesh = match tool {
+        Tool::Antenna => piece::circle(&shapes),
+        Tool::Gate => piece::bar(&shapes),
+        _ => piece::square(&shapes),
+    };
     let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z));
 
     match ghost.single_mut() {
@@ -434,7 +555,7 @@ fn place_selected_tool(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
-    placed: Query<(Entity, &Placed)>,
+    placed: Query<(Entity, &Placed, &Facing)>,
     ui_interactions: Query<&Interaction>,
     mut switches: Switches,
     selected: Res<SelectedTool>,
@@ -443,40 +564,52 @@ fn place_selected_tool(
         return;
     }
 
-    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+    let Some(point) = cursor_world(&windows, &camera_query, &ui_interactions) else {
         return;
     };
-
-    let occupant = placed
-        .iter()
-        .find(|(_, occupant)| occupant.cell == cell)
-        .map(|(entity, occupant)| (entity, occupant.tool));
+    let cell = grid::cell(point);
 
     // In modo "Sposta" il tasto sinistro trascina la vista; in modo "Cancella"
     // toglie di mezzo l'oggetto puntato. In nessuno dei due si piazza qualcosa.
-    let tool = match selected.0 {
-        EditorTool::Pan => return,
-        EditorTool::Erase => {
-            if let Some((entity, _)) = occupant {
-                commands.entity(entity).despawn();
-            }
-            return;
+    if selected.0 == EditorTool::Pan {
+        return;
+    }
+    if selected.0 == EditorTool::Erase {
+        // Si toglie quello che si sta puntando: sulla figura l'oggetto di linea,
+        // altrove l'antenna che gli sta sotto.
+        if let Some((entity, _)) = clicked_piece(point, cell, || placed.iter()) {
+            commands.entity(entity).despawn();
         }
-        EditorTool::Place(tool) => tool,
-    };
-
-    if let Some((entity, occupant)) = occupant {
-        // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
-        // aggiorna il modulo dell'oggetto guardando lo stato.
-        if occupant == tool {
-            switches.toggle(entity);
-            return;
-        }
-
-        commands.entity(entity).despawn();
+        return;
     }
 
-    place_in_cell(&mut commands, tool, cell, Facing::default());
+    for tool in selected.0.places() {
+        // Si guarda solo il proprio piano: un'antenna si appoggia sotto un
+        // oggetto gia' piazzato senza portarlo via, e viceversa.
+        let same_layer = occupant_on(
+            cell,
+            tool.layer(),
+            placed.iter().map(|(entity, placed, _)| (entity, placed)),
+        );
+
+        if let Some((entity, occupant)) = same_layer {
+            // Stesso strumento: si accende o si spegne quello che c'e', e con lo
+            // strumento doppio si accende solo la parte che si sta puntando.
+            // Rimpiazzarli tutti e due azzererebbe i loro interruttori.
+            if occupant == tool {
+                let pointed = clicked_piece(point, cell, || placed.iter());
+
+                if pointed.is_none_or(|(pointed, _)| pointed == entity) {
+                    switches.toggle(entity);
+                }
+                continue;
+            }
+
+            commands.entity(entity).despawn();
+        }
+
+        place_in_cell(&mut commands, tool, cell, Facing::default());
+    }
 }
 
 /// In modo "Sposta" il tasto sinistro trascina la vista, ma una pressione che
@@ -488,7 +621,7 @@ fn toggle_by_click(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     ui_interactions: Query<&Interaction>,
     selected: Res<SelectedTool>,
-    placed: Query<(Entity, &Placed)>,
+    placed: Query<(Entity, &Placed, &Facing)>,
     mut switches: Switches,
     mut press: ResMut<PressOrigin>,
 ) {
@@ -520,10 +653,11 @@ fn toggle_by_click(
         return;
     }
 
-    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+    let Some(point) = cursor_world(&windows, &camera_query, &ui_interactions) else {
         return;
     };
-    let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) else {
+    let cell = grid::cell(point);
+    let Some((entity, _)) = clicked_piece(point, cell, || placed.iter()) else {
         return;
     };
 
@@ -585,12 +719,19 @@ fn rotate_piece(
     let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
         return;
     };
-    let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) else {
-        return;
-    };
+    // Si gira tutto quello che sta nella cella, non solo l'oggetto in cima: un
+    // gate e l'antenna che gli sta sotto devono restare d'accordo, altrimenti
+    // la sbarra finirebbe da un lato e l'antenna dall'altro.
+    let in_cell: Vec<Entity> = placed
+        .iter()
+        .filter(|(_, placed)| placed.cell == cell)
+        .map(|(entity, _)| entity)
+        .collect();
 
-    if let Ok(mut facing) = facings.get_mut(entity) {
-        facing.0 = facing.0.turn_right();
+    for entity in in_cell {
+        if let Ok(mut facing) = facings.get_mut(entity) {
+            facing.0 = facing.0.turn_right();
+        }
     }
 }
 
@@ -603,24 +744,29 @@ fn drag_piece(
     ui_interactions: Query<&Interaction>,
     selected: Res<SelectedTool>,
     mut dragged: ResMut<DraggedPiece>,
-    mut placed: Query<(Entity, &mut Placed, &mut Transform)>,
+    mut placed: Query<(Entity, &mut Placed, &mut Transform, &Facing)>,
 ) {
     if mouse.just_released(MouseButton::Left) {
         dragged.0 = None;
         return;
     }
 
-    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+    let Some(point) = cursor_world(&windows, &camera_query, &ui_interactions) else {
         return;
     };
+    let cell = grid::cell(point);
 
     if mouse.just_pressed(MouseButton::Left) {
+        // Si prende quello che si sta puntando, con la stessa regola del clic:
+        // trascinare per la corona sposta l'antenna e non il gate che la copre.
         dragged.0 = (selected.0 == EditorTool::Pan)
             .then(|| {
-                placed
-                    .iter()
-                    .find(|(_, placed, _)| placed.cell == cell)
-                    .map(|(entity, _, _)| entity)
+                clicked_piece(point, cell, || {
+                    placed
+                        .iter()
+                        .map(|(entity, placed, _, facing)| (entity, placed, facing))
+                })
+                .map(|(entity, _)| entity)
             })
             .flatten();
         return;
@@ -631,15 +777,20 @@ fn drag_piece(
     };
 
     // Una cella gia' occupata non si sovrascrive trascinandoci sopra: sarebbe
-    // una perdita silenziosa dell'oggetto che c'era.
-    let occupied = placed
-        .iter()
-        .any(|(other, placed, _)| other != entity && placed.cell == cell);
+    // una perdita silenziosa dell'oggetto che c'era. Occupata pero' vuol dire
+    // sul piano di chi si sta trascinando: un'antenna passa sotto un gate.
+    let Ok((_, dragging, _, _)) = placed.get(entity) else {
+        return;
+    };
+    let layer = dragging.tool.layer();
+    let occupied = placed.iter().any(|(other, placed, _, _)| {
+        other != entity && placed.cell == cell && placed.tool.layer() == layer
+    });
     if occupied {
         return;
     }
 
-    if let Ok((_, mut placed, mut transform)) = placed.get_mut(entity)
+    if let Ok((_, mut placed, mut transform, _)) = placed.get_mut(entity)
         && placed.cell != cell
     {
         placed.cell = cell;
@@ -696,5 +847,147 @@ fn handle_layout_buttons(
                 Err(error) => error!("caricamento fallito: {error}"),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::piece::{BAR_OFFSET, PIECE_SIZE};
+
+    fn cell_with(tools: [Tool; 2]) -> Vec<(Entity, Placed, Facing)> {
+        tools
+            .into_iter()
+            .map(|tool| {
+                (
+                    Entity::PLACEHOLDER,
+                    Placed {
+                        tool,
+                        cell: IVec2::new(2, -3),
+                    },
+                    Facing::default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Il punto dell'antenna: sta sotto, quindi convive con l'oggetto di linea
+    /// invece di prenderne il posto.
+    #[test]
+    fn an_antenna_and_an_object_share_the_same_cell() {
+        let cell = IVec2::new(2, -3);
+
+        // In tutti e due gli ordini di inserimento: chi c'era prima non conta.
+        for order in [[Tool::Antenna, Tool::Gate], [Tool::Gate, Tool::Antenna]] {
+            let objects = cell_with(order);
+            let entries = || objects.iter().map(|(entity, placed, _)| (*entity, placed));
+
+            assert_eq!(
+                occupant_on(cell, Layer::Track, entries()).map(|(_, tool)| tool),
+                Some(Tool::Gate),
+                "un gate vede solo il gate"
+            );
+            assert_eq!(
+                occupant_on(cell, Layer::Under, entries()).map(|(_, tool)| tool),
+                Some(Tool::Antenna),
+                "un'antenna vede solo l'antenna"
+            );
+            assert_eq!(
+                topmost(cell, entries()).map(|(_, tool)| tool),
+                Some(Tool::Gate),
+                "il clic prende quello che si vede"
+            );
+        }
+    }
+
+    /// Su una cella con la sola antenna non c'e' niente da cui difenderla: e'
+    /// lei quella in cima, e il clic la prende.
+    #[test]
+    fn an_antenna_alone_is_the_one_you_click() {
+        let cell = IVec2::ZERO;
+        let objects = vec![(
+            Entity::PLACEHOLDER,
+            Placed {
+                tool: Tool::Antenna,
+                cell,
+            },
+        )];
+        let entries = || objects.iter().map(|(entity, placed)| (*entity, placed));
+
+        assert_eq!(
+            topmost(cell, entries()).map(|(_, tool)| tool),
+            Some(Tool::Antenna)
+        );
+        assert!(occupant_on(cell, Layer::Track, entries()).is_none());
+    }
+
+    /// Il punto della modifica alla sbarra: nella cella di un gate il centro
+    /// resta libero, quindi ci sta un'antenna e la si puo' accendere cliccandoci
+    /// sopra. Sulla sbarra invece il clic e' del gate.
+    #[test]
+    fn in_a_gate_cell_the_middle_belongs_to_the_antenna() {
+        let cell = IVec2::new(2, -3);
+        let centre = grid::cell_center(cell);
+        let objects = cell_with([Tool::Gate, Tool::Antenna]);
+        let entries = || {
+            objects
+                .iter()
+                .map(|(entity, placed, facing)| (*entity, placed, facing))
+        };
+
+        // Il gate e' girato a sinistra: la sbarra sta sul lato sinistro.
+        let on_the_bar = centre + Vec2::new(-BAR_OFFSET, 0.0);
+        assert_eq!(
+            clicked_piece(on_the_bar, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Gate)
+        );
+
+        assert_eq!(
+            clicked_piece(centre, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Antenna),
+            "al centro della cella c'e' l'antenna, scoperta"
+        );
+
+        // Sul lato opposto non c'e' sbarra: li' non c'e' nemmeno l'antenna, ma
+        // il clic resta della cella, quindi torna al gate.
+        let far_side = centre + Vec2::new(BAR_OFFSET, 0.0);
+        assert_eq!(
+            clicked_piece(far_side, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Antenna),
+            "fuori dalla figura del gate risponde chi gli sta sotto"
+        );
+    }
+
+    /// Sotto un oggetto quadrato l'antenna e' coperta del tutto, e il quadrato
+    /// si prende i clic che gli cadono sopra.
+    #[test]
+    fn under_a_square_piece_the_square_takes_the_click() {
+        let cell = IVec2::new(2, -3);
+        let centre = grid::cell_center(cell);
+        let objects = cell_with([Tool::Atr, Tool::Antenna]);
+        let entries = || {
+            objects
+                .iter()
+                .map(|(entity, placed, facing)| (*entity, placed, facing))
+        };
+
+        assert_eq!(
+            clicked_piece(centre, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Atr)
+        );
+        // Negli angoli della cella, fuori dal quadrato, si arriva all'antenna.
+        let corner = centre + Vec2::splat(PIECE_SIZE / 2.0 + 2.0);
+        assert_eq!(
+            clicked_piece(corner, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Antenna)
+        );
+    }
+
+    /// L'antenna deve finire sotto ai carrier, che viaggiano a quota zero, e
+    /// sotto agli oggetti di linea.
+    #[test]
+    fn the_antenna_lies_below_carriers_and_objects() {
+        assert!(Tool::Antenna.layer().z() < 0.0);
+        assert!(Tool::Antenna.layer().z() < Tool::Gate.layer().z());
     }
 }

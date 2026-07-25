@@ -5,9 +5,31 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::carrier::Heading;
+use crate::carrier::{CARRIER_RADIUS, Heading};
+use crate::editor::Tool;
+use crate::grid::GRID_STEP;
 
 pub const PIECE_SIZE: f32 = 30.0;
+/// Un paio di pixel piu' larga di un carrier: quando il carrier le si ferma
+/// sopra ne resta scoperta una corona sottile, che dice che l'antenna c'e', di
+/// che colore e', e la rende cliccabile.
+pub const ANTENNA_RADIUS: f32 = CARRIER_RADIUS + 2.0;
+
+/// Il gate non e' un quadrato come gli altri ma una sbarra su un lato della
+/// cella. Cosi' il carrier che ferma si arresta quasi al centro della cella
+/// invece che sul confine, e sotto di lui ci puo' stare un'antenna che lo legge.
+pub const BAR_LENGTH: f32 = 48.0;
+pub const BAR_THICKNESS: f32 = 8.0;
+/// Quanto dista dal centro della cella: appoggiata al confine e tutta dentro la
+/// propria cella, cosi' due gate accostati non si sovrappongono.
+pub const BAR_OFFSET: f32 = (GRID_STEP - BAR_THICKNESS) / 2.0;
+
+/// Anche l'antenna sta spostata verso il lato, e non a caso: e' esattamente
+/// dove si ferma il carrier che la sbarra blocca. Il conto e' la faccia interna
+/// della sbarra meno il raggio del carrier, cioe' il punto in cui il carrier si
+/// arresta; cosi' se un giorno cambiano lo spessore della sbarra o la misura
+/// del carrier, l'antenna resta sotto di lui senza doverla ritoccare.
+pub const ANTENNA_OFFSET: f32 = BAR_OFFSET - BAR_THICKNESS / 2.0 - CARRIER_RADIUS;
 /// Lunghezza complessiva della freccia, stelo compreso.
 const ARROW_LENGTH: f32 = 20.0;
 const ARROW_HEAD: f32 = 8.0;
@@ -60,6 +82,8 @@ impl Default for Facing {
 #[derive(Resource)]
 pub struct PieceShapes {
     square: Handle<Mesh>,
+    circle: Handle<Mesh>,
+    bar: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
     curved_arrow: Handle<Mesh>,
     stop: Handle<Mesh>,
@@ -155,6 +179,15 @@ fn setup_piece_shapes(
 ) {
     commands.insert_resource(PieceShapes {
         square: meshes.add(Rectangle::new(PIECE_SIZE, PIECE_SIZE)),
+        circle: meshes
+            .add(Mesh::from(Circle::new(ANTENNA_RADIUS)).translated_by(Vec3::Y * ANTENNA_OFFSET)),
+        // La sbarra e' spostata nella mesh stessa e non nel Transform: la
+        // posizione dell'oggetto resta il centro della cella, che e' quello che
+        // sanno la griglia, il salvataggio e il trascinamento.
+        bar: meshes.add(
+            Mesh::from(Rectangle::new(BAR_LENGTH, BAR_THICKNESS))
+                .translated_by(Vec3::Y * BAR_OFFSET),
+        ),
         straight_arrow: meshes.add(straight_arrow()),
         curved_arrow: meshes.add(curved_arrow()),
         stop: meshes.add(Rectangle::new(STOP_SIZE, STOP_SIZE)),
@@ -168,6 +201,41 @@ pub fn square(shapes: &PieceShapes) -> Handle<Mesh> {
     shapes.square.clone()
 }
 
+/// Mesh del cerchio dell'antenna, usata anche dall'anteprima dell'editor. Sta
+/// qui perche' l'anteprima deve avere la stessa forma dell'oggetto che promette,
+/// e averne una copia sola lo garantisce.
+pub fn circle(shapes: &PieceShapes) -> Handle<Mesh> {
+    shapes.circle.clone()
+}
+
+/// Mesh della sbarra del gate.
+pub fn bar(shapes: &PieceShapes) -> Handle<Mesh> {
+    shapes.bar.clone()
+}
+
+/// La figura che un oggetto occupa davvero dentro la sua cella. Serve a sapere
+/// che cosa si sta puntando quando due oggetti condividono la cella: sulla
+/// figura c'e' quello di linea, altrove l'antenna che gli sta sotto.
+pub fn covers(tool: Tool, facing: Facing, centre: Vec2, point: Vec2) -> bool {
+    let offset = point - centre;
+
+    match tool {
+        // La sbarra sta su un lato: il punto va riportato nel verso del gate
+        // prima di misurarlo, altrimenti si misurerebbe sempre lo stesso lato.
+        Tool::Gate => {
+            let local = facing.0.rotation().inverse() * offset.extend(0.0);
+
+            local.x.abs() <= BAR_LENGTH / 2.0 && (local.y - BAR_OFFSET).abs() <= BAR_THICKNESS / 2.0
+        }
+        Tool::Antenna => {
+            let local = facing.0.rotation().inverse() * offset.extend(0.0);
+
+            local.truncate().distance(Vec2::Y * ANTENNA_OFFSET) <= ANTENNA_RADIUS
+        }
+        _ => offset.abs().cmple(Vec2::splat(PIECE_SIZE / 2.0)).all(),
+    }
+}
+
 /// Da' corpo a un oggetto: il quadrato del suo colore, con dentro la freccia che
 /// gli compete. Chi non ha un verso resta un quadrato pieno, e infatti il gate
 /// blocca comunque lo si giri.
@@ -178,9 +246,29 @@ pub fn dress(
     material: Handle<ColorMaterial>,
     arrow: Arrow,
 ) {
+    dress_shape(
+        commands,
+        entity,
+        shapes,
+        shapes.square.clone(),
+        material,
+        arrow,
+    );
+}
+
+/// Come `dress` ma con una figura scelta: la usa il gate, che e' una sbarra e
+/// non un quadrato.
+pub fn dress_shape(
+    commands: &mut Commands,
+    entity: Entity,
+    shapes: &PieceShapes,
+    shape: Handle<Mesh>,
+    material: Handle<ColorMaterial>,
+    arrow: Arrow,
+) {
     commands
         .entity(entity)
-        .insert((Mesh2d(shapes.square.clone()), MeshMaterial2d(material)));
+        .insert((Mesh2d(shape), MeshMaterial2d(material)));
 
     let Some((mesh, material, tilt)) = (match arrow {
         Arrow::None => None,
@@ -223,6 +311,72 @@ fn orient_pieces(pieces: Query<(&Facing, &mut Transform), Changed<Facing>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// La sbarra sta su un lato della cella e lascia libero il centro: e' li'
+    /// che va l'antenna, ed e' li' che si ferma il carrier.
+    #[test]
+    fn the_bar_leans_on_the_side_and_leaves_the_middle_free() {
+        let centre = Vec2::ZERO;
+        let facing = Facing(Heading::Up);
+
+        assert!(
+            covers(Tool::Gate, facing, centre, Vec2::new(0.0, BAR_OFFSET)),
+            "sulla sbarra"
+        );
+        assert!(
+            !covers(Tool::Gate, facing, centre, centre),
+            "il centro della cella resta dell'antenna"
+        );
+        // Girato di un quarto, la sbarra passa sull'altro lato.
+        assert!(covers(
+            Tool::Gate,
+            Facing(Heading::Left),
+            centre,
+            Vec2::new(-BAR_OFFSET, 0.0)
+        ));
+        assert!(!covers(
+            Tool::Gate,
+            Facing(Heading::Left),
+            centre,
+            Vec2::new(0.0, BAR_OFFSET)
+        ));
+    }
+
+    /// Gli altri oggetti restano quadrati, e coprono l'antenna che gli sta
+    /// sotto: e' il prezzo di averla grande quanto un carrier.
+    #[test]
+    fn the_other_pieces_are_still_squares() {
+        let inside = Vec2::splat(PIECE_SIZE / 2.0 - 1.0);
+        let outside = Vec2::splat(PIECE_SIZE / 2.0 + 1.0);
+
+        assert!(covers(Tool::Atr, Facing::default(), Vec2::ZERO, inside));
+        assert!(!covers(Tool::Atr, Facing::default(), Vec2::ZERO, outside));
+    }
+
+    /// L'antenna non e' al centro della cella ma spostata verso il lato, e si
+    /// gira insieme all'oggetto: e' li' che si ferma il carrier da leggere.
+    #[test]
+    fn the_antenna_sits_where_the_stopped_carrier_stands() {
+        let centre = Vec2::ZERO;
+        let up = Facing(Heading::Up);
+
+        assert!(covers(
+            Tool::Antenna,
+            up,
+            centre,
+            Vec2::new(0.0, ANTENNA_OFFSET)
+        ));
+        assert!(
+            !covers(Tool::Antenna, up, centre, Vec2::new(0.0, -ANTENNA_OFFSET)),
+            "dalla parte opposta non c'e'"
+        );
+        // Girata, si sposta con l'oggetto.
+        assert!(covers(
+            Tool::Antenna,
+            Facing(Heading::Left),
+            centre,
+            Vec2::new(-ANTENNA_OFFSET, 0.0)
+        ));
+    }
 
     /// La freccia e' disegnata verso l'alto: la rotazione la porta nel verso
     /// dell'orientamento.

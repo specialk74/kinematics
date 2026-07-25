@@ -1,11 +1,15 @@
 use bevy::prelude::*;
 
-use crate::geometry::circle_touches_box;
-use crate::piece::{self, Arrow, PIECE_SIZE, PieceShapes};
+use crate::carrier::{Blocker, Heading};
+use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, Facing, PieceShapes};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
 /// quando e' spenta li lascia passare. Se e' fuori dal flusso non blocca nessuno,
 /// perche' il controllo e' puramente geometrico.
+///
+/// Occupa un lato della cella, quello verso cui e' girata, e non tutta la cella:
+/// cosi' il carrier che ferma si arresta quasi al centro della cella accanto,
+/// dove puo' esserci un'antenna a leggerlo.
 #[derive(Component)]
 pub struct Gate {
     pub active: bool,
@@ -35,11 +39,19 @@ fn setup_gate_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorM
     });
 }
 
-/// Vero se un cerchio di raggio `radius` centrato in `point` tocca il gate.
-/// Il raggio arriva da fuori: cosi' il gate non ha bisogno di sapere nulla
-/// di com'e' fatto un carrier.
-pub fn blocks_circle(gate: Vec3, point: Vec3, radius: f32) -> bool {
-    circle_touches_box(gate, Vec2::splat(PIECE_SIZE / 2.0), point, radius)
+/// L'ostacolo che il gate mette sul percorso: la striscia occupata dalla sbarra,
+/// non tutta la cella. Chi ferma i carrier non ha bisogno di sapere altro.
+pub fn bar(position: Vec3, facing: Heading) -> Blocker {
+    let along = facing.as_vec();
+    let centre = position + (along * BAR_OFFSET).extend(0.0);
+
+    // La sbarra e' lunga di traverso al verso in cui e' girata.
+    let half = Vec2::new(
+        along.x.abs() * BAR_THICKNESS + along.y.abs() * BAR_LENGTH,
+        along.x.abs() * BAR_LENGTH + along.y.abs() * BAR_THICKNESS,
+    ) / 2.0;
+
+    Blocker { centre, half }
 }
 
 /// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
@@ -65,10 +77,11 @@ fn attach_gate_visuals(
     gates: Query<(Entity, &Gate), Without<Mesh2d>>,
 ) {
     for (entity, gate) in gates.iter() {
-        piece::dress(
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            piece::bar(&shapes),
             material_for(&assets, gate.active),
             Arrow::None,
         );
@@ -89,27 +102,40 @@ fn refresh_gate_colour(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::carrier::CARRIER_RADIUS;
+    use crate::carrier::{CARRIER_RADIUS, blocks};
+    use crate::grid::GRID_STEP;
 
+    /// Un gate girato a sinistra ferma chi arriva da destra, e non tocca chi
+    /// passa sulla corsia accanto.
     #[test]
     fn gate_blocks_only_what_passes_through_it() {
-        let on_belt = Vec3::new(0.0, 0.0, 1.0);
-        let off_belt = Vec3::new(0.0, 200.0, 1.0);
+        let gate = bar(Vec3::ZERO, Heading::Left);
         let carrier_far = Vec3::new(40.0, 0.0, 0.0);
-        let carrier_close = Vec3::new(17.0, 0.0, 0.0);
+        let carrier_close = Vec3::new(-10.0, 0.0, 0.0);
+        let other_lane = Vec3::new(-10.0, GRID_STEP, 0.0);
 
         assert!(
-            !blocks_circle(on_belt, carrier_far, CARRIER_RADIUS),
+            !blocks(gate, carrier_far, CARRIER_RADIUS),
             "carrier ancora lontano dal gate: deve passare"
         );
         assert!(
-            blocks_circle(on_belt, carrier_close, CARRIER_RADIUS),
-            "carrier arrivato sul gate: deve essere fermato"
+            blocks(gate, carrier_close, CARRIER_RADIUS),
+            "carrier arrivato sulla sbarra: deve essere fermato"
         );
         assert!(
-            !blocks_circle(off_belt, carrier_close, CARRIER_RADIUS),
+            !blocks(gate, other_lane, CARRIER_RADIUS),
             "gate fuori dal flusso: non deve bloccare nessuno"
         );
-        assert!(!blocks_circle(off_belt, carrier_far, CARRIER_RADIUS));
+    }
+
+    /// La sbarra sta tutta dentro la propria cella, appoggiata al confine: due
+    /// gate accostati fanno un muro continuo invece di sovrapporsi.
+    #[test]
+    fn the_bar_stays_inside_its_own_cell() {
+        let Blocker { centre, half } = bar(Vec3::ZERO, Heading::Left);
+
+        assert_eq!(centre.x + half.x, -GRID_STEP / 2.0 + BAR_THICKNESS);
+        assert!(centre.x - half.x >= -GRID_STEP / 2.0);
+        assert_eq!(half.y, BAR_LENGTH / 2.0, "lunga di traverso alla marcia");
     }
 }

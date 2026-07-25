@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::antenna::Antenna;
 use crate::divert::{Divert, DivertKind};
 use crate::editor::Tool;
 use crate::gate::Gate;
@@ -90,6 +91,7 @@ pub struct Switches<'w, 's> {
     diverts: Query<'w, 's, &'static mut Divert>,
     turners: Query<'w, 's, &'static mut Turner>,
     reversers: Query<'w, 's, &'static mut Reverser>,
+    antennas: Query<'w, 's, &'static mut Antenna>,
 }
 
 impl Switches<'_, '_> {
@@ -103,8 +105,10 @@ impl Switches<'_, '_> {
             Some(divert.active)
         } else if let Ok(turner) = self.turners.get(entity) {
             Some(turner.active)
+        } else if let Ok(reverser) = self.reversers.get(entity) {
+            Some(reverser.active)
         } else {
-            self.reversers.get(entity).ok().map(|r| r.active)
+            self.antennas.get(entity).ok().map(|a| a.active)
         }
     }
 
@@ -119,6 +123,8 @@ impl Switches<'_, '_> {
             turner.active = active;
         } else if let Ok(mut reverser) = self.reversers.get_mut(entity) {
             reverser.active = active;
+        } else if let Ok(mut antenna) = self.antennas.get_mut(entity) {
+            antenna.active = active;
         }
     }
 
@@ -144,7 +150,9 @@ impl Plugin for LayoutPlugin {
 /// Unico punto in cui nasce un oggetto della scena: lo usano il clic
 /// dell'editor, il bottone Carica e l'avvio da riga di comando.
 pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: Facing) {
-    let position = crate::grid::cell_center(cell).extend(1.0);
+    // La quota la decide il piano dell'oggetto: quelli di linea stanno sopra ai
+    // carrier, l'antenna sotto.
+    let position = crate::grid::cell_center(cell).extend(tool.layer().z());
     let object = match tool {
         Tool::CarrierSource => crate::source::spawn_source(commands, position),
         Tool::Gate => crate::gate::spawn_gate(commands, position),
@@ -153,6 +161,7 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: F
         Tool::Despawner => crate::despawner::spawn_despawner(commands, position),
         Tool::Turner => crate::turner::spawn_turner(commands, position),
         Tool::Reverser => crate::reverser::spawn_reverser(commands, position),
+        Tool::Antenna => crate::antenna::spawn_antenna(commands, position),
     };
 
     commands
