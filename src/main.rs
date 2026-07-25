@@ -4,7 +4,9 @@ use rand::prelude::*;
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
-pub const CARRIER_SIZE: f32 = 34.0;
+pub const CARRIER_RADIUS: f32 = 15.0;
+pub const CARRIER_THICKNESS: f32 = 3.0;
+pub const CARRIER_SIZE: f32 = CARRIER_RADIUS * 2.0 + 4.0;
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
 
@@ -48,8 +50,33 @@ fn main() {
         .run();
 }
 
-fn setup(mut commands: Commands) {
+/// Mesh e materiali dei carrier, creati una volta sola: se venissero costruiti a
+/// ogni spawn si accumulerebbero asset identici per tutta la durata del gioco.
+#[derive(Resource)]
+struct CarrierAssets {
+    empty_mesh: Handle<Mesh>,
+    empty_material: Handle<ColorMaterial>,
+    with_tube_mesh: Handle<Mesh>,
+    with_tube_material: Handle<ColorMaterial>,
+}
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
     commands.spawn(Camera2d);
+
+    commands.insert_resource(CarrierAssets {
+        // Il carrier vuoto e' un anello: cerchio senza riempimento.
+        empty_mesh: meshes.add(Annulus::new(
+            CARRIER_RADIUS - CARRIER_THICKNESS,
+            CARRIER_RADIUS,
+        )),
+        empty_material: materials.add(Color::WHITE),
+        with_tube_mesh: meshes.add(Circle::new(CARRIER_RADIUS)),
+        with_tube_material: materials.add(Color::srgb(0.0, 0.8, 0.2)),
+    });
 
     commands.spawn((
         Text2d::new("@"),
@@ -84,6 +111,7 @@ fn spawn_carrier(
     mut commands: Commands,
     timer: Res<CarrierSpawnTimer>,
     carriers: Query<&Transform, With<Carrier>>,
+    carrier_assets: Res<CarrierAssets>,
 ) {
     if !timer.is_finished() {
         return;
@@ -106,25 +134,17 @@ fn spawn_carrier(
     let mut rng = rand::rng();
     if rng.random::<u32>() > u32::MAX / 2 {
         commands.spawn((
-            Text2d::new("O"),
-            TextFont {
-                font_size: 50.0,
-                ..default()
-            },
+            Mesh2d(carrier_assets.with_tube_mesh.clone()),
+            MeshMaterial2d(carrier_assets.with_tube_material.clone()),
             Transform::from_translation(spawn),
-            TextColor(Color::srgb(1.0, 0.0, 1.0)),
             Carrier(CarrierType::WithTube),
             children![Tube],
         ));
     } else {
         commands.spawn((
-            Text2d::new("<"),
-            TextFont {
-                font_size: 50.0,
-                ..default()
-            },
+            Mesh2d(carrier_assets.empty_mesh.clone()),
+            MeshMaterial2d(carrier_assets.empty_material.clone()),
             Transform::from_translation(spawn),
-            TextColor(Color::srgb(1.0, 1.0, 0.0)),
             Carrier(CarrierType::Empty),
         ));
     }
