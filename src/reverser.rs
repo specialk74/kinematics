@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
-use crate::carrier::{Heading, Motion, Sense};
+use crate::carrier::{Heading, Motion};
 use crate::grid::GRID_STEP;
 
 pub const REVERSER_SIZE: f32 = 30.0;
@@ -14,13 +14,11 @@ pub const TURN_RADIUS: f32 = GRID_STEP / 2.0;
 /// una linea parallela, una cella piu' in la'. Non ripercorre la linea di
 /// andata, che e' il motivo per cui la curva c'e'.
 ///
-/// Il verso di rotazione decide da che parte finisce, e vale per qualunque
-/// marcia: un carrier che va a sinistra e curva in senso antiorario esce una
-/// cella piu' in basso, uno che sale ed e' preso dalla stessa curva esce una
-/// cella piu' a sinistra.
+/// La curva gira sempre verso la sinistra del carrier, e questo vale per
+/// qualunque marcia: chi va a sinistra esce una cella piu' in basso, chi sale
+/// esce una cella piu' a sinistra.
 #[derive(Component)]
 pub struct Reverser {
-    pub sense: Sense,
     pub active: bool,
 }
 
@@ -29,10 +27,12 @@ impl Reverser {
     /// carrier che arriva marciando in `heading`. Il centro sta mezza cella di
     /// lato, quindi il mezzo giro copre esattamente una cella.
     pub fn turn(&self, position: Vec3, heading: Heading) -> Motion {
+        // Il centro sta alla sinistra del carrier: la curva e' antioraria.
+        let left = -heading.turn_right().as_vec();
+
         Motion::Turning {
-            centre: position.truncate() + self.sense.centre_side(heading) * TURN_RADIUS,
+            centre: position.truncate() + left * TURN_RADIUS,
             remaining: PI,
-            sense: self.sense,
             exit: heading.opposite(),
         }
     }
@@ -50,8 +50,7 @@ impl Plugin for ReverserVisualsPlugin {
 #[derive(Resource)]
 pub struct ReverserAssets {
     mesh: Handle<Mesh>,
-    counter_clockwise_material: Handle<ColorMaterial>,
-    clockwise_material: Handle<ColorMaterial>,
+    active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
@@ -63,10 +62,7 @@ fn setup_reverser_assets(
     commands.insert_resource(ReverserAssets {
         // Rombo: distinto da triangoli, quadrati, sbarre e cerchi.
         mesh: meshes.add(Rhombus::new(REVERSER_SIZE, REVERSER_SIZE)),
-        // Due colori per i due versi: la forma da sola non basterebbe a dire
-        // da che parte curva.
-        counter_clockwise_material: materials.add(Color::srgb(0.65, 0.30, 0.95)),
-        clockwise_material: materials.add(Color::srgb(0.95, 0.30, 0.65)),
+        active_material: materials.add(Color::srgb(0.65, 0.30, 0.95)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
 }
@@ -76,23 +72,20 @@ pub fn shape(assets: &ReverserAssets) -> (Handle<Mesh>, Quat) {
     (assets.mesh.clone(), Quat::IDENTITY)
 }
 
-pub fn spawn_reverser(commands: &mut Commands, position: Vec3, sense: Sense) -> Entity {
+pub fn spawn_reverser(commands: &mut Commands, position: Vec3) -> Entity {
     commands
         .spawn((
             Transform::from_translation(position),
-            Reverser {
-                sense,
-                active: true,
-            },
+            Reverser { active: true },
         ))
         .id()
 }
 
 fn material_for(assets: &ReverserAssets, reverser: &Reverser) -> Handle<ColorMaterial> {
-    match (reverser.active, reverser.sense) {
-        (false, _) => assets.idle_material.clone(),
-        (true, Sense::CounterClockwise) => assets.counter_clockwise_material.clone(),
-        (true, Sense::Clockwise) => assets.clockwise_material.clone(),
+    if reverser.active {
+        assets.active_material.clone()
+    } else {
+        assets.idle_material.clone()
     }
 }
 
@@ -124,19 +117,15 @@ fn refresh_reverser_colour(
 mod tests {
     use super::*;
 
-    fn reverser(sense: Sense) -> Reverser {
-        Reverser {
-            sense,
-            active: true,
-        }
+    fn reverser() -> Reverser {
+        Reverser { active: true }
     }
 
     /// Il caso di partenza: chi va a sinistra e curva in antiorario esce verso
     /// destra una cella piu' in basso.
     #[test]
     fn a_leftward_carrier_turning_counter_clockwise_comes_out_one_cell_below() {
-        let Motion::Turning { centre, exit, .. } =
-            reverser(Sense::CounterClockwise).turn(Vec3::ZERO, Heading::Left)
+        let Motion::Turning { centre, exit, .. } = reverser().turn(Vec3::ZERO, Heading::Left)
         else {
             panic!("l'inversione deve produrre una curva");
         };
@@ -146,28 +135,11 @@ mod tests {
         assert_eq!(exit, Heading::Right);
     }
 
-    /// Lo stesso flusso con la curva opposta esce dalla parte opposta: e' il
-    /// caso "da sotto a sopra" che con un solo verso non era ottenibile.
-    #[test]
-    fn the_other_sense_sends_the_same_flow_one_cell_above() {
-        let Motion::Turning { centre, exit, .. } =
-            reverser(Sense::Clockwise).turn(Vec3::ZERO, Heading::Left)
-        else {
-            panic!("l'inversione deve produrre una curva");
-        };
-
-        assert_eq!(centre, Vec2::new(0.0, TURN_RADIUS));
-        assert_eq!(centre.y + TURN_RADIUS, GRID_STEP, "esce una cella sopra");
-        assert_eq!(exit, Heading::Right);
-    }
-
     /// La stessa inversione su un flusso verticale: chi sale torna giu' una
     /// cella di lato, senza ripassare dalla colonna di salita.
     #[test]
     fn a_rising_carrier_is_turned_sideways_and_sent_down() {
-        let Motion::Turning { centre, exit, .. } =
-            reverser(Sense::CounterClockwise).turn(Vec3::ZERO, Heading::Up)
-        else {
+        let Motion::Turning { centre, exit, .. } = reverser().turn(Vec3::ZERO, Heading::Up) else {
             panic!("l'inversione deve produrre una curva");
         };
 

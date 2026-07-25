@@ -35,10 +35,7 @@ pub enum Tool {
     /// resta quello di prima per non invalidare i layout gia' salvati.
     #[serde(alias = "Riser")]
     Turner,
-    /// Curva antioraria. Il nome resta quello di prima perche' e' il vocabolario
-    /// dei file gia' salvati: rinominarlo li invaliderebbe.
     Reverser,
-    ReverserClockwise,
 }
 
 impl Tool {
@@ -50,8 +47,7 @@ impl Tool {
             Tool::Atr => "ATR",
             Tool::Despawner => "Despawn",
             Tool::Turner => "Svolta",
-            Tool::Reverser => "Inv. antior.",
-            Tool::ReverserClockwise => "Inv. oraria",
+            Tool::Reverser => "Inversione",
         }
     }
 }
@@ -80,7 +76,7 @@ impl EditorTool {
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 10] = [
+const MODES: [EditorTool; 9] = [
     EditorTool::Pan,
     EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
@@ -90,7 +86,6 @@ const MODES: [EditorTool; 10] = [
     EditorTool::Place(Tool::Despawner),
     EditorTool::Place(Tool::Turner),
     EditorTool::Place(Tool::Reverser),
-    EditorTool::Place(Tool::ReverserClockwise),
 ];
 
 /// Modo attivo.
@@ -124,6 +119,20 @@ impl LayoutAction {
 
 #[derive(Component)]
 struct LayoutButton(LayoutAction);
+
+/// L'etichetta dentro al bottone, per poterla riscrivere dopo un salvataggio.
+#[derive(Component)]
+struct LayoutButtonLabel(LayoutAction);
+
+/// Per quanto tempo il bottone Salva mostra com'e' andata.
+const NOTICE_SECONDS: f32 = 2.0;
+const BUTTON_DONE: Color = Color::srgb(0.15, 0.55, 0.25);
+const BUTTON_FAILED: Color = Color::srgb(0.70, 0.15, 0.15);
+
+/// Esito dell'ultimo salvataggio, finche' va mostrato. Senza, l'unico segnale
+/// era una riga di log che l'utente non ha davanti agli occhi.
+#[derive(Resource, Default)]
+struct SaveNotice(Option<(bool, Timer)>);
 
 /// Spostamento sotto il quale una pressione conta come clic e non come
 /// trascinata: serve a non commutare un oggetto quando ci si appoggia sopra per
@@ -221,7 +230,7 @@ fn tool_shape(
         Tool::Atr => divert::shape(divert_assets, DivertKind::Atr),
         Tool::Despawner => despawner::shape(despawner_assets),
         Tool::Turner => turner::shape(turner_assets),
-        Tool::Reverser | Tool::ReverserClockwise => reverser::shape(reverser_assets),
+        Tool::Reverser => reverser::shape(reverser_assets),
     }
 }
 
@@ -231,6 +240,7 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
             .init_resource::<PressOrigin>()
+            .init_resource::<SaveNotice>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
             .add_systems(
                 Update,
@@ -241,6 +251,7 @@ impl Plugin for EditorPlugin {
                     place_selected_tool,
                     toggle_by_click,
                     handle_layout_buttons,
+                    show_save_outcome,
                 ),
             );
     }
@@ -301,7 +312,7 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
                     button_node(),
                     BackgroundColor(BUTTON_IDLE),
                     LayoutButton(action),
-                    children![button_label(action.label())],
+                    children![(button_label(action.label()), LayoutButtonLabel(action))],
                 ));
             }
         });
@@ -452,21 +463,29 @@ fn place_selected_tool(
         return;
     }
 
-    // In modo "Sposta" il tasto sinistro serve a trascinare la vista: qui non
-    // deve succedere niente, ne' piazzare ne' accendere.
-    let EditorTool::Place(tool) = selected.0 else {
-        return;
-    };
-
     let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
         return;
     };
 
-    if let Some((entity, occupant)) = placed
+    let occupant = placed
         .iter()
         .find(|(_, occupant)| occupant.cell == cell)
-        .map(|(entity, occupant)| (entity, occupant.tool))
-    {
+        .map(|(entity, occupant)| (entity, occupant.tool));
+
+    // In modo "Sposta" il tasto sinistro trascina la vista; in modo "Cancella"
+    // toglie di mezzo l'oggetto puntato. In nessuno dei due si piazza qualcosa.
+    let tool = match selected.0 {
+        EditorTool::Pan => return,
+        EditorTool::Erase => {
+            if let Some((entity, _)) = occupant {
+                commands.entity(entity).despawn();
+            }
+            return;
+        }
+        EditorTool::Place(tool) => tool,
+    };
+
+    if let Some((entity, occupant)) = occupant {
         // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
         // aggiorna il modulo dell'oggetto guardando lo stato.
         if occupant == tool {
@@ -531,6 +550,44 @@ fn toggle_by_click(
     toggle_object(entity, &mut switches);
 }
 
+/// Mostra sul bottone Salva com'e' andata, e dopo qualche secondo lo rimette
+/// com'era. E' il riscontro che prima mancava: il log lo vede solo chi lo guarda.
+fn show_save_outcome(
+    time: Res<Time>,
+    mut notice: ResMut<SaveNotice>,
+    mut buttons: Query<(&LayoutButton, &mut BackgroundColor)>,
+    mut labels: Query<(&LayoutButtonLabel, &mut Text)>,
+) {
+    let Some((saved, timer)) = notice.0.as_mut() else {
+        return;
+    };
+
+    timer.tick(time.delta());
+    let saved = *saved;
+    let expired = timer.is_finished();
+
+    let (colour, text) = match (expired, saved) {
+        (true, _) => (BUTTON_IDLE, LayoutAction::Save.label()),
+        (false, true) => (BUTTON_DONE, "Salvato"),
+        (false, false) => (BUTTON_FAILED, "Errore"),
+    };
+
+    for (button, mut background) in buttons.iter_mut() {
+        if button.0 == LayoutAction::Save {
+            background.0 = colour;
+        }
+    }
+    for (label, mut content) in labels.iter_mut() {
+        if label.0 == LayoutAction::Save {
+            content.0 = text.to_string();
+        }
+    }
+
+    if expired {
+        notice.0 = None;
+    }
+}
+
 /// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in
 /// scena; il caricamento la sostituisce, carrier in volo compresi: lasciarli
 /// vivi vorrebbe dire vederli percorrere corsie che non esistono piu'.
@@ -540,6 +597,7 @@ fn handle_layout_buttons(
     placed: Query<(Entity, &Placed)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
+    mut notice: ResMut<SaveNotice>,
 ) {
     for (interaction, button) in buttons.iter() {
         if *interaction != Interaction::Pressed {
@@ -558,10 +616,18 @@ fn handle_layout_buttons(
                         .collect(),
                 };
 
-                match layout::save(&layout, &layout_file.path) {
-                    Ok(()) => info!("layout salvato in {}", layout_file.path),
-                    Err(error) => error!("salvataggio fallito: {error}"),
-                }
+                let saved = match layout::save(&layout, &layout_file.path) {
+                    Ok(()) => {
+                        info!("layout salvato in {}", layout_file.path);
+                        true
+                    }
+                    Err(error) => {
+                        error!("salvataggio fallito: {error}");
+                        false
+                    }
+                };
+
+                notice.0 = Some((saved, Timer::from_seconds(NOTICE_SECONDS, TimerMode::Once)));
             }
 
             LayoutAction::Load => match layout::load(&layout_file.path) {

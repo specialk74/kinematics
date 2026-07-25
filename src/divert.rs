@@ -2,6 +2,8 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
+use crate::carrier::Heading;
+
 pub const DIVERT_SIZE: f32 = 30.0;
 /// Dislivello fra la corsia principale e quella deviata.
 pub const LANE_HEIGHT: f32 = 64.0;
@@ -29,40 +31,42 @@ pub struct Divert {
 }
 
 impl Divert {
-    /// Quota a cui il deviatore porta i carrier che aggancia: una corsia sopra la
-    /// propria per il divert, una sotto per l'ATR. Il riferimento e' dove sta il
-    /// deviatore, non da dove viene il carrier — che quindi non ha bisogno di
-    /// ricordarsi niente. A far tornare i conti e' la griglia: ha il passo di una
-    /// corsia, quindi un divert e l'ATR della riga sopra si compongono esatti.
-    pub fn target_y(&self, own_y: f32) -> f32 {
+    /// Di quanto il deviatore sposta il carrier **di lato rispetto alla sua
+    /// marcia**: una cella verso la sua destra per il divert, una verso la sua
+    /// sinistra per l'ATR. Riferirlo al carrier e non agli assi e' quello che lo
+    /// fa funzionare anche su un flusso verticale: chi sale viene spostato di una
+    /// colonna a destra, esattamente come chi va a sinistra viene alzato di una riga.
+    pub fn lateral_target(&self) -> f32 {
         match self.kind {
-            DivertKind::Divert => own_y + LANE_HEIGHT,
-            DivertKind::Atr => own_y - LANE_HEIGHT,
+            DivertKind::Divert => LANE_HEIGHT,
+            DivertKind::Atr => -LANE_HEIGHT,
         }
     }
 
-    /// Vero se il deviatore, piazzato in `position`, sta agganciando il carrier.
-    /// La fascia copre il corridoio fra la corsia del deviatore e quella di
-    /// destinazione: ci sta dentro tutta la manovra, e i carrier che viaggiano
-    /// altrove non vengono toccati.
-    pub fn catches(&self, position: Vec3, carrier: Vec3) -> bool {
+    /// Quanto il carrier e' spostato di lato rispetto alla linea del deviatore.
+    pub fn lateral_offset(position: Vec3, carrier: Vec3, heading: Heading) -> f32 {
+        (carrier.truncate() - position.truncate()).dot(heading.turn_right().as_vec())
+    }
+
+    /// Vero se il deviatore, piazzato in `position`, aggancia un carrier che
+    /// marcia in `heading`. La fascia copre il corridoio fra la linea del
+    /// deviatore e quella di destinazione: ci sta dentro tutta la manovra, e i
+    /// carrier che viaggiano altrove non vengono toccati.
+    pub fn catches(&self, position: Vec3, carrier: Vec3, heading: Heading) -> bool {
         if !self.active {
             return false;
         }
 
-        if (carrier.x - position.x).abs() > DIVERT_ZONE_HALF_WIDTH {
+        let delta = carrier.truncate() - position.truncate();
+        if delta.dot(heading.as_vec()).abs() > DIVERT_ZONE_HALF_WIDTH {
             return false;
         }
 
-        let height = carrier.y - position.y;
-        match self.kind {
-            DivertKind::Divert => {
-                (-DIVERT_LANE_TOLERANCE..=LANE_HEIGHT + DIVERT_LANE_TOLERANCE).contains(&height)
-            }
-            DivertKind::Atr => {
-                (-LANE_HEIGHT - DIVERT_LANE_TOLERANCE..=DIVERT_LANE_TOLERANCE).contains(&height)
-            }
-        }
+        let target = self.lateral_target();
+        let corridor =
+            target.min(0.0) - DIVERT_LANE_TOLERANCE..=target.max(0.0) + DIVERT_LANE_TOLERANCE;
+
+        corridor.contains(&Divert::lateral_offset(position, carrier, heading))
     }
 }
 
@@ -158,50 +162,80 @@ mod tests {
         Divert { kind, active: true }
     }
 
-    /// Traslazioni opposte e della stessa ampiezza: e' quello che permette a un
+    /// Spostamenti opposti e della stessa ampiezza: e' quello che permette a un
     /// divert e a un ATR di annullarsi a vicenda.
     #[test]
-    fn the_two_kinds_translate_by_one_lane_in_opposite_directions() {
-        let lane = -120.0;
+    fn the_two_kinds_shift_by_one_cell_in_opposite_directions() {
+        assert_eq!(divert(DivertKind::Divert).lateral_target(), LANE_HEIGHT);
+        assert_eq!(divert(DivertKind::Atr).lateral_target(), -LANE_HEIGHT);
+    }
 
+    /// Il caso che mancava: su un flusso verticale lo spostamento resta "a
+    /// destra del carrier", quindi diventa orizzontale.
+    #[test]
+    fn a_rising_carrier_is_shifted_sideways() {
+        let up = divert(DivertKind::Divert);
+        let position = Vec3::ZERO;
+
+        // Il carrier sale lungo la colonna del deviatore: sta sulla sua linea.
         assert_eq!(
-            divert(DivertKind::Divert).target_y(lane),
-            lane + LANE_HEIGHT
+            Divert::lateral_offset(position, Vec3::ZERO, Heading::Up),
+            0.0
         );
-        assert_eq!(divert(DivertKind::Atr).target_y(lane), lane - LANE_HEIGHT);
+        assert!(up.catches(position, Vec3::ZERO, Heading::Up));
+
+        // Una colonna a destra e' la destinazione: li' la manovra e' finita.
+        let arrived = Vec3::new(LANE_HEIGHT, 0.0, 0.0);
+        assert_eq!(
+            Divert::lateral_offset(position, arrived, Heading::Up),
+            LANE_HEIGHT
+        );
+        assert!(up.catches(position, arrived, Heading::Up));
+
+        // Una colonna a sinistra e' fuori dal corridoio.
+        assert!(!up.catches(position, Vec3::new(-LANE_HEIGHT, 0.0, 0.0), Heading::Up));
     }
 
     /// La fascia di aggancio copre il corridoio della manovra e niente altro:
     /// sopra il divert, sotto l'ATR.
+    /// Su un flusso verso sinistra la destra del carrier e' l'alto: il divert
+    /// guarda sopra di se', l'ATR sotto.
     #[test]
     fn the_catch_band_covers_the_manoeuvre_only() {
         let up = divert(DivertKind::Divert);
         let down = divert(DivertKind::Atr);
         let position = Vec3::ZERO;
+        let left = Heading::Left;
 
-        assert!(up.catches(position, Vec3::ZERO), "corsia del deviatore");
         assert!(
-            up.catches(position, Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0)),
+            up.catches(position, Vec3::ZERO, left),
+            "linea del deviatore"
+        );
+        assert!(
+            up.catches(position, Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0), left),
             "a meta' della salita"
         );
         assert!(
-            !up.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0)),
+            !up.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0), left),
             "il divert non guarda sotto di se'"
         );
 
-        assert!(down.catches(position, Vec3::ZERO), "corsia del deviatore");
         assert!(
-            down.catches(position, Vec3::new(-10.0, -LANE_HEIGHT / 2.0, 0.0)),
+            down.catches(position, Vec3::ZERO, left),
+            "linea del deviatore"
+        );
+        assert!(
+            down.catches(position, Vec3::new(-10.0, -LANE_HEIGHT / 2.0, 0.0), left),
             "a meta' della discesa"
         );
         assert!(
-            !down.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0)),
+            !down.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0), left),
             "l'ATR non guarda sopra di se'"
         );
 
         assert!(
-            !up.catches(position, Vec3::new(60.0, 0.0, 0.0)),
-            "fuori dalla finestra orizzontale"
+            !up.catches(position, Vec3::new(60.0, 0.0, 0.0), left),
+            "fuori dalla finestra di aggancio"
         );
     }
 
@@ -210,6 +244,6 @@ mod tests {
         let mut up = divert(DivertKind::Divert);
         up.active = false;
 
-        assert!(!up.catches(Vec3::ZERO, Vec3::ZERO));
+        assert!(!up.catches(Vec3::ZERO, Vec3::ZERO, Heading::Left));
     }
 }

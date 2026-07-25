@@ -85,47 +85,17 @@ impl Heading {
     }
 }
 
-/// Verso di rotazione di una curva. Non dipende dagli assi ma dalla marcia del
-/// carrier: e' quello che permette alla stessa inversione di funzionare sia su
-/// un flusso orizzontale sia su uno verticale.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Sense {
-    CounterClockwise,
-    Clockwise,
-}
-
-impl Sense {
-    /// Da che parte sta il centro della curva rispetto alla marcia: alla
-    /// sinistra del carrier se antiorario, alla sua destra se orario.
-    pub fn centre_side(self, heading: Heading) -> Vec2 {
-        let along = heading.as_vec();
-
-        match self {
-            Sense::CounterClockwise => Vec2::new(-along.y, along.x),
-            Sense::Clockwise => Vec2::new(along.y, -along.x),
-        }
-    }
-
-    fn sign(self) -> f32 {
-        match self {
-            Sense::CounterClockwise => 1.0,
-            Sense::Clockwise => -1.0,
-        }
-    }
-}
-
 /// Come si sta muovendo il carrier in questo momento. Non e' un ricordo del
 /// passato ma il suo stato di moto: gli oggetti che incontra lo cambiano, e
 /// senza incontri prosegue com'e'.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Motion {
     Straight(Heading),
-    /// Sta percorrendo un arco attorno a `centre` per altri `remaining`
-    /// radianti, dopodiche' riparte dritto verso `exit`.
+    /// Sta percorrendo un arco in senso antiorario attorno a `centre` per altri
+    /// `remaining` radianti, dopodiche' riparte dritto verso `exit`.
     Turning {
         centre: Vec2,
         remaining: f32,
-        sense: Sense,
         exit: Heading,
     },
 }
@@ -353,13 +323,11 @@ fn carrier_step(
     if let Motion::Turning {
         centre,
         remaining,
-        sense,
         exit,
     } = carrier.motion
     {
         let turned = (BELT_SPEED / TURN_RADIUS * delta_secs).min(remaining);
-        let offset =
-            Vec2::from_angle(sense.sign() * turned).rotate(translation.truncate() - centre);
+        let offset = Vec2::from_angle(turned).rotate(translation.truncate() - centre);
         let step = (centre + offset - translation.truncate()).extend(0.0);
 
         let left = remaining - turned;
@@ -369,7 +337,6 @@ fn carrier_step(
             Motion::Turning {
                 centre,
                 remaining: left,
-                sense,
                 exit,
             }
         };
@@ -409,23 +376,28 @@ fn carrier_step(
     }
 
     for (divert, position) in track.diverts {
-        if !divert.catches(*position, translation) {
+        if !divert.catches(*position, translation, heading) {
             continue;
         }
 
-        // Il passo verticale non supera mai la quota di destinazione: e' questo
-        // che fa arrivare il carrier esattamente sulla corsia voluta, invece di
+        // Lo spostamento e' di lato rispetto alla marcia, non lungo un asse
+        // fisso: e' cosi' che un divert su un flusso verticale sposta di una
+        // colonna invece che di una riga.
+        let sideways = heading.turn_right().as_vec();
+        let offset = Divert::lateral_offset(*position, translation, heading);
+        // Il passo di lato non supera mai la destinazione: e' questo che fa
+        // arrivare il carrier esattamente sulla linea voluta, invece di
         // lasciarlo dove capita quando esce dalla finestra del deviatore.
         let reach = BELT_SPEED * delta_secs;
-        let lift = (divert.target_y(position.y) - translation.y).clamp(-reach, reach);
+        let shift = (divert.lateral_target() - offset).clamp(-reach, reach);
         // Gia' a destinazione: questo deviatore non ha niente da fare, ma un
-        // altro nella stessa colonna potrebbe averne.
-        if lift == 0.0 {
+        // altro sulla stessa linea potrebbe averne.
+        if shift == 0.0 {
             continue;
         }
 
-        let along = heading.as_vec().x * CARRIER_DIVERT_SPEED * delta_secs;
-        return (Vec3::new(along, lift, 0.0), carrier.motion);
+        let forward = heading.as_vec() * CARRIER_DIVERT_SPEED * delta_secs;
+        return ((forward + sideways * shift).extend(0.0), carrier.motion);
     }
 
     (straight, carrier.motion)
@@ -676,6 +648,79 @@ mod tests {
         }
     }
 
+    /// Il caso che mancava: su un flusso verticale il divert sposta il carrier
+    /// di una colonna a destra, non di una riga in alto.
+    #[test]
+    fn a_divert_shifts_a_rising_carrier_one_column_to_its_right() {
+        let divert = Divert {
+            kind: DivertKind::Divert,
+            active: true,
+        };
+        let divert_position = Vec3::ZERO;
+        let diverts = [(&divert, divert_position)];
+        let track = only_diverts(&diverts);
+
+        let mut carrier = carrier(CarrierType::WithTube);
+        carrier.motion = Motion::Straight(Heading::Up);
+        let end = run(&mut carrier, Vec3::new(0.0, -GRID_STEP, 0.0), &track, 400);
+
+        assert!(
+            (end.x - GRID_STEP).abs() < 0.01,
+            "deve trovarsi una colonna a destra, non a x = {}",
+            end.x
+        );
+        assert_eq!(
+            carrier.motion,
+            Motion::Straight(Heading::Up),
+            "la marcia non cambia: il divert sposta di lato, non gira"
+        );
+    }
+
+    /// L'ATR e' lo specchio del divert e segue la stessa regola relativa: su un
+    /// flusso verticale sposta di una colonna a sinistra del carrier.
+    #[test]
+    fn an_atr_shifts_a_rising_carrier_one_column_to_its_left() {
+        let atr_position = Vec3::ZERO;
+        let diverts = [(&atr(), atr_position)];
+        let track = only_diverts(&diverts);
+
+        let mut carrier = carrier(CarrierType::WithTube);
+        carrier.motion = Motion::Straight(Heading::Up);
+        let end = run(&mut carrier, Vec3::new(0.0, -GRID_STEP, 0.0), &track, 400);
+
+        assert!(
+            (end.x - (-GRID_STEP)).abs() < 0.01,
+            "deve trovarsi una colonna a sinistra, non a x = {}",
+            end.x
+        );
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Up));
+    }
+
+    /// Divert e ATR si annullano a vicenda su qualunque marcia, non solo
+    /// sull'orizzontale: e' quello che li rende una coppia.
+    #[test]
+    fn divert_and_atr_cancel_out_on_a_vertical_flow() {
+        let divert = Divert {
+            kind: DivertKind::Divert,
+            active: true,
+        };
+        let diverts = [
+            (&divert, Vec3::new(0.0, 0.0, 0.0)),
+            (&atr(), Vec3::new(GRID_STEP, 3.0 * GRID_STEP, 0.0)),
+        ];
+        let track = only_diverts(&diverts);
+
+        let mut carrier = carrier(CarrierType::WithTube);
+        carrier.motion = Motion::Straight(Heading::Up);
+        let end = run(&mut carrier, Vec3::new(0.0, -GRID_STEP, 0.0), &track, 800);
+
+        assert!(
+            end.x.abs() < 0.01,
+            "deve essere tornato sulla colonna di partenza, non a x = {}",
+            end.x
+        );
+    }
+
     /// Chi va a sinistra svolta verso l'alto: la destra e' quella del carrier.
     #[test]
     fn a_turner_sends_a_leftward_carrier_upwards() {
@@ -761,10 +806,7 @@ mod tests {
     /// diversa da quella di andata, senza mai risalire sopra di essa.
     #[test]
     fn the_reverser_sends_the_carrier_back_on_another_line() {
-        let reverser = Reverser {
-            sense: Sense::CounterClockwise,
-            active: true,
-        };
+        let reverser = Reverser { active: true };
         let reverser_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
@@ -800,10 +842,7 @@ mod tests {
     /// su una colonna diversa da quella di salita.
     #[test]
     fn the_reverser_also_turns_a_rising_carrier() {
-        let reverser = Reverser {
-            sense: Sense::CounterClockwise,
-            active: true,
-        };
+        let reverser = Reverser { active: true };
         let reverser_position = Vec3::new(0.0, 0.0, 0.0);
         let track = Track {
             diverts: &[],
@@ -828,10 +867,7 @@ mod tests {
 
     #[test]
     fn a_switched_off_reverser_lets_the_carrier_through() {
-        let reverser = Reverser {
-            sense: Sense::CounterClockwise,
-            active: false,
-        };
+        let reverser = Reverser { active: false };
         let track = Track {
             diverts: &[],
             turners: &[],
