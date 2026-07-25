@@ -2,14 +2,21 @@ use bevy::prelude::*;
 
 mod carrier;
 mod divert;
+mod editor;
 mod gate;
+mod source;
 
 use carrier::CarrierPlugin;
 use divert::DivertPlugin;
+use editor::{EditorPlugin, PALETTE_WIDTH};
 use gate::GatePlugin;
+use source::SourcePlugin;
 
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
+/// Bordo sinistro dell'area di lavoro in coordinate mondo: piu' a sinistra c'e'
+/// la barra degli strumenti, dove non si piazza nulla e i carrier spariscono.
+pub const WORK_AREA_LEFT: f32 = -(WIDTH as f32) / 2.0 + PALETTE_WIDTH;
 
 fn main() {
     App::new()
@@ -21,7 +28,13 @@ fn main() {
             }),
             ..Default::default()
         }))
-        .add_plugins((CarrierPlugin, DivertPlugin, GatePlugin))
+        .add_plugins((
+            CarrierPlugin,
+            SourcePlugin,
+            GatePlugin,
+            DivertPlugin,
+            EditorPlugin,
+        ))
         .add_systems(Startup, setup_camera)
         .run();
 }

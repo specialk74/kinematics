@@ -1,10 +1,9 @@
 use bevy::prelude::*;
 use rand::prelude::*;
 
-use crate::WIDTH;
+use crate::WORK_AREA_LEFT;
 use crate::gate::{Gate, blocks_circle};
 
-pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
 pub const CARRIER_RADIUS: f32 = 15.0;
@@ -28,24 +27,15 @@ pub struct CarrierPlugin;
 
 impl Plugin for CarrierPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CarrierSpawnTimer>()
-            .add_systems(Startup, setup_carrier_assets)
-            .add_systems(
-                Update,
-                (
-                    tick_carrier_spawn_timer,
-                    spawn_carrier,
-                    move_carrier,
-                    despawn_offscreen,
-                ),
-            );
+        app.add_systems(Startup, setup_carrier_assets)
+            .add_systems(Update, (move_carrier, despawn_offscreen));
     }
 }
 
 /// Mesh e materiali dei carrier, creati una volta sola: se venissero costruiti a
 /// ogni spawn si accumulerebbero asset identici per tutta la durata del gioco.
 #[derive(Resource)]
-struct CarrierAssets {
+pub struct CarrierAssets {
     empty_mesh: Handle<Mesh>,
     empty_material: Handle<ColorMaterial>,
     with_tube_mesh: Handle<Mesh>,
@@ -69,60 +59,22 @@ fn setup_carrier_assets(
     });
 }
 
-#[derive(Resource, Deref, DerefMut)]
-pub struct CarrierSpawnTimer(Timer);
-
-impl Default for CarrierSpawnTimer {
-    fn default() -> Self {
-        CarrierSpawnTimer(Timer::from_seconds(
-            CARRIER_SPAWN_TIME,
-            TimerMode::Repeating,
-        ))
-    }
-}
-
-pub fn tick_carrier_spawn_timer(mut timer: ResMut<CarrierSpawnTimer>, time: Res<Time>) {
-    timer.tick(time.delta());
-}
-
-fn spawn_carrier(
-    mut commands: Commands,
-    timer: Res<CarrierSpawnTimer>,
-    carriers: Query<&Transform, With<Carrier>>,
-    carrier_assets: Res<CarrierAssets>,
-) {
-    if !timer.is_finished() {
-        return;
-    }
-
-    let spawn = Vec3 {
-        x: WIDTH as f32 / 2.0 - 50.0,
-        y: 0.0,
-        z: 0.0,
-    };
-
-    // Non far entrare un carrier sopra a uno ancora fermo in coda all'ingresso.
-    if carriers
-        .iter()
-        .any(|transform| transform.translation.distance(spawn) < CARRIER_SIZE)
-    {
-        return;
-    }
-
+/// Immette un carrier nel flusso; il tipo (vuoto o con tubo) e' casuale 50-50.
+pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, position: Vec3) {
     let mut rng = rand::rng();
     if rng.random::<u32>() > u32::MAX / 2 {
         commands.spawn((
-            Mesh2d(carrier_assets.with_tube_mesh.clone()),
-            MeshMaterial2d(carrier_assets.with_tube_material.clone()),
-            Transform::from_translation(spawn),
+            Mesh2d(assets.with_tube_mesh.clone()),
+            MeshMaterial2d(assets.with_tube_material.clone()),
+            Transform::from_translation(position),
             Carrier(CarrierType::WithTube),
             children![Tube],
         ));
     } else {
         commands.spawn((
-            Mesh2d(carrier_assets.empty_mesh.clone()),
-            MeshMaterial2d(carrier_assets.empty_material.clone()),
-            Transform::from_translation(spawn),
+            Mesh2d(assets.empty_mesh.clone()),
+            MeshMaterial2d(assets.empty_material.clone()),
+            Transform::from_translation(position),
             Carrier(CarrierType::Empty),
         ));
     }
@@ -204,6 +156,12 @@ fn despawn_offscreen(
 ) {
     let (camera, camera_transform) = camera_query.single().unwrap();
     for (entity, transform) in query.iter() {
+        // Fine corsa: il carrier e' scomparso sotto la barra degli strumenti.
+        if transform.translation.x + CARRIER_RADIUS < WORK_AREA_LEFT {
+            commands.entity(entity).despawn();
+            continue;
+        }
+
         if let Some(pos) = camera.world_to_ndc(camera_transform, transform.translation) {
             // Add a buffer (e.g., 1.2 instead of 1.0) to hide things before they pop out
             if pos.x.abs() > 1.2 || pos.y.abs() > 1.2 {

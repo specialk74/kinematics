@@ -15,13 +15,12 @@ pub struct GatePlugin;
 
 impl Plugin for GatePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_gate_assets)
-            .add_systems(Update, place_gate);
+        app.add_systems(Startup, setup_gate_assets);
     }
 }
 
 #[derive(Resource)]
-struct GateAssets {
+pub struct GateAssets {
     mesh: Handle<Mesh>,
     active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
@@ -54,53 +53,37 @@ fn contains(gate: Vec3, point: Vec2) -> bool {
     (point - gate.truncate()).abs().cmple(half_gate).all()
 }
 
-/// Click sinistro: piazza un gate attivo sotto al mouse. Se il click cade su un
-/// gate gia' esistente ne commuta lo stato, cosi' si puo' aprire e chiudere il
-/// flusso restando sullo stesso pulsante.
-fn place_gate(
-    mut commands: Commands,
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut gates: Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>)>,
-    gate_assets: Res<GateAssets>,
-) {
-    if !buttons.just_pressed(MouseButton::Left) {
-        return;
-    }
+/// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
+/// resta visibile quando si accodano.
+pub fn spawn_gate(commands: &mut Commands, assets: &GateAssets, position: Vec3) {
+    commands.spawn((
+        Mesh2d(assets.mesh.clone()),
+        MeshMaterial2d(assets.active_material.clone()),
+        Transform::from_translation(position),
+        Gate { active: true },
+    ));
+}
 
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-    let Ok(position) = camera.viewport_to_world_2d(camera_transform, cursor) else {
-        return;
-    };
-
+/// Commuta il gate sotto al punto indicato, colore compreso. Restituisce `false`
+/// se li' non c'e' nessun gate, cosi' chi chiama sa che il clic e' ancora libero.
+pub fn toggle_gate_at(
+    position: Vec2,
+    gates: &mut Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>)>,
+    assets: &GateAssets,
+) -> bool {
     for (mut gate, transform, mut material) in gates.iter_mut() {
         if contains(transform.translation, position) {
             gate.active = !gate.active;
             material.0 = if gate.active {
-                gate_assets.active_material.clone()
+                assets.active_material.clone()
             } else {
-                gate_assets.idle_material.clone()
+                assets.idle_material.clone()
             };
-            return;
+            return true;
         }
     }
 
-    commands.spawn((
-        Mesh2d(gate_assets.mesh.clone()),
-        MeshMaterial2d(gate_assets.active_material.clone()),
-        // z davanti ai carrier, cosi' la sbarra resta visibile quando si accodano.
-        Transform::from_translation(position.extend(1.0)),
-        Gate { active: true },
-    ));
+    false
 }
 
 #[cfg(test)]
