@@ -29,21 +29,22 @@ pub struct Divert {
 }
 
 impl Divert {
-    /// Quota a cui questo deviatore porta un carrier partito da `home_lane`.
-    /// E' il punto fisso del movimento: il carrier ci arriva esatto e li' smette
-    /// di salire o scendere. Nota che non dipende da dove e' piazzato il
-    /// deviatore, ma dalla corsia della sorgente: e' cosi' che l'ATR riporta il
-    /// flusso sulla linea di partenza anche se lo piazzi sulla corsia deviata.
-    pub fn target_y(&self, home_lane: f32) -> f32 {
+    /// Quota a cui il deviatore porta i carrier che aggancia: una corsia sopra la
+    /// propria per il divert, una sotto per l'ATR. Il riferimento e' dove sta il
+    /// deviatore, non da dove viene il carrier — che quindi non ha bisogno di
+    /// ricordarsi niente. A far tornare i conti e' la griglia: ha il passo di una
+    /// corsia, quindi un divert e l'ATR della riga sopra si compongono esatti.
+    pub fn target_y(&self, own_y: f32) -> f32 {
         match self.kind {
-            DivertKind::Divert => home_lane + LANE_HEIGHT,
-            DivertKind::Atr => home_lane,
+            DivertKind::Divert => own_y + LANE_HEIGHT,
+            DivertKind::Atr => own_y - LANE_HEIGHT,
         }
     }
 
     /// Vero se il deviatore, piazzato in `position`, sta agganciando il carrier.
-    /// La fascia copre una corsia sopra e una sotto, cosi' il marcatore lavora
-    /// sia che lo si metta sulla corsia principale sia su quella deviata.
+    /// La fascia copre il corridoio fra la corsia del deviatore e quella di
+    /// destinazione: ci sta dentro tutta la manovra, e i carrier che viaggiano
+    /// altrove non vengono toccati.
     pub fn catches(&self, position: Vec3, carrier: Vec3) -> bool {
         if !self.active {
             return false;
@@ -53,7 +54,15 @@ impl Divert {
             return false;
         }
 
-        (carrier.y - position.y).abs() <= LANE_HEIGHT + DIVERT_LANE_TOLERANCE
+        let height = carrier.y - position.y;
+        match self.kind {
+            DivertKind::Divert => {
+                (-DIVERT_LANE_TOLERANCE..=LANE_HEIGHT + DIVERT_LANE_TOLERANCE).contains(&height)
+            }
+            DivertKind::Atr => {
+                (-LANE_HEIGHT - DIVERT_LANE_TOLERANCE..=DIVERT_LANE_TOLERANCE).contains(&height)
+            }
+        }
     }
 }
 
@@ -136,46 +145,47 @@ mod tests {
         Divert { kind, active: true }
     }
 
+    /// Traslazioni opposte e della stessa ampiezza: e' quello che permette a un
+    /// divert e a un ATR di annullarsi a vicenda.
     #[test]
-    fn the_two_kinds_target_opposite_lanes() {
-        assert_eq!(divert(DivertKind::Divert).target_y(0.0), LANE_HEIGHT);
-        assert_eq!(divert(DivertKind::Atr).target_y(0.0), 0.0);
+    fn the_two_kinds_translate_by_one_lane_in_opposite_directions() {
+        let lane = -120.0;
+
+        assert_eq!(
+            divert(DivertKind::Divert).target_y(lane),
+            lane + LANE_HEIGHT
+        );
+        assert_eq!(divert(DivertKind::Atr).target_y(lane), lane - LANE_HEIGHT);
     }
 
-    /// Il caso che conta: l'ATR piazzato sulla corsia deviata deve comunque
-    /// riportare il carrier sulla linea della sorgente, non sulla propria.
+    /// La fascia di aggancio copre il corridoio della manovra e niente altro:
+    /// sopra il divert, sotto l'ATR.
     #[test]
-    fn atr_targets_the_source_lane_even_when_placed_on_the_diverted_lane() {
-        let source_lane = -120.0;
-        let atr = divert(DivertKind::Atr);
-        let atr_position = Vec3::new(0.0, source_lane + LANE_HEIGHT, 0.0);
-        let carrier = Vec3::new(0.0, source_lane + LANE_HEIGHT, 0.0);
-
-        assert!(atr.catches(atr_position, carrier));
-        assert_eq!(atr.target_y(source_lane), source_lane);
-    }
-
-    #[test]
-    fn a_deviator_works_from_either_lane() {
+    fn the_catch_band_covers_the_manoeuvre_only() {
         let up = divert(DivertKind::Divert);
+        let down = divert(DivertKind::Atr);
         let position = Vec3::ZERO;
 
+        assert!(up.catches(position, Vec3::ZERO), "corsia del deviatore");
         assert!(
-            up.catches(position, Vec3::new(0.0, 0.0, 0.0)),
-            "corsia propria"
+            up.catches(position, Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0)),
+            "a meta' della salita"
         );
         assert!(
-            up.catches(position, Vec3::new(-10.0, 30.0, 0.0)),
-            "a meta' del cambio di corsia"
+            !up.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0)),
+            "il divert non guarda sotto di se'"
+        );
+
+        assert!(down.catches(position, Vec3::ZERO), "corsia del deviatore");
+        assert!(
+            down.catches(position, Vec3::new(-10.0, -LANE_HEIGHT / 2.0, 0.0)),
+            "a meta' della discesa"
         );
         assert!(
-            up.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0)),
-            "una corsia piu' su: e' il caso dell'ATR piazzato in alto"
+            !down.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0)),
+            "l'ATR non guarda sopra di se'"
         );
-        assert!(
-            !up.catches(position, Vec3::new(0.0, 2.0 * LANE_HEIGHT, 0.0)),
-            "due corsie piu' su: troppo lontano"
-        );
+
         assert!(
             !up.catches(position, Vec3::new(60.0, 0.0, 0.0)),
             "fuori dalla finestra orizzontale"

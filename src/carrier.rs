@@ -19,14 +19,11 @@ pub enum CarrierType {
     WithTube,
 }
 
+/// Il carrier non sa niente del percorso: sono i deviatori che incontra a dirgli
+/// dove andare.
 #[derive(Component)]
 pub struct Carrier {
     pub kind: CarrierType,
-    /// Quota della sorgente da cui e' partito. E' la corsia "di casa": il divert
-    /// lo porta una corsia piu' su, l'ATR lo riporta esattamente qui. Legarla al
-    /// carrier invece che al marcatore fa si' che il rientro sia sulla linea
-    /// della sorgente, ovunque si piazzino i deviatori.
-    pub home_lane: f32,
 }
 
 #[derive(Component)]
@@ -80,7 +77,6 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::WithTube,
-                home_lane: position.y,
             },
             children![Tube],
         ));
@@ -91,7 +87,6 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::Empty,
-                home_lane: position.y,
             },
         ));
     }
@@ -120,9 +115,11 @@ fn carrier_step(
         // che fa arrivare il carrier esattamente sulla corsia voluta, invece di
         // lasciarlo dove capita quando esce dalla finestra del deviatore.
         let reach = BELT_SPEED * delta_secs;
-        let lift = (divert.target_y(carrier.home_lane) - translation.y).clamp(-reach, reach);
+        let lift = (divert.target_y(position.y) - translation.y).clamp(-reach, reach);
+        // Gia' a destinazione: questo deviatore non ha niente da fare, ma un
+        // altro nella stessa colonna potrebbe averne.
         if lift == 0.0 {
-            break;
+            continue;
         }
 
         return Vec3::new(-CARRIER_DIVERT_SPEED * delta_secs, lift, 0.0);
@@ -195,10 +192,12 @@ fn move_carrier(
 mod tests {
     use super::*;
     use crate::divert::{DivertKind, LANE_HEIGHT};
+    use crate::grid::GRID_STEP;
 
     const DELTA: f32 = 1.0 / 60.0;
 
-    const SOURCE_LANE: f32 = -120.0;
+    /// La corsia principale su cui stanno le sorgenti, in coordinate mondo.
+    const MAIN_LANE: f32 = -120.0;
 
     fn atr() -> Divert {
         Divert {
@@ -208,30 +207,59 @@ mod tests {
     }
 
     fn carrier(kind: CarrierType) -> Carrier {
-        Carrier {
-            kind,
-            home_lane: SOURCE_LANE,
-        }
+        Carrier { kind }
     }
 
-    /// Lo scenario dello screenshot: ATR piazzato sulla corsia deviata, per giunta
-    /// non perfettamente allineato. Il carrier deve comunque tornare sulla linea
-    /// della sorgente, non fermarsi qualche pixel sotto il marcatore.
+    /// Il caso completo: divert sulla corsia principale, ATR una cella piu' su.
+    /// Il carrier deve salire di una corsia esatta e tornare esattamente da dove
+    /// era partito, senza portarsi dietro nessuna informazione.
     #[test]
-    fn atr_lands_carriers_on_the_source_lane() {
-        let atr = atr();
-        let atr_position = Vec3::new(0.0, SOURCE_LANE + LANE_HEIGHT - 7.0, 0.0);
+    fn divert_and_atr_hand_the_carrier_back_to_the_main_lane() {
+        let divert = Divert {
+            kind: DivertKind::Divert,
+            active: true,
+        };
+        let deviators = [
+            (&divert, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (
+                &atr(),
+                Vec3::new(-3.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
+            ),
+        ];
+
         let carrier = carrier(CarrierType::WithTube);
-        let mut position = Vec3::new(DIVERT_ZONE_HALF_WIDTH, SOURCE_LANE + LANE_HEIGHT, 0.0);
+        let mut position = Vec3::new(4.0 * GRID_STEP, MAIN_LANE, 0.0);
+        let mut highest = MAIN_LANE;
+
+        for _ in 0..1000 {
+            position += carrier_step(&carrier, position, &deviators, DELTA);
+            highest = highest.max(position.y);
+        }
+
+        assert_eq!(
+            highest,
+            MAIN_LANE + LANE_HEIGHT,
+            "il divert alza di una corsia esatta"
+        );
+        assert_eq!(
+            position.y, MAIN_LANE,
+            "l'ATR riporta il carrier sulla corsia principale"
+        );
+    }
+
+    /// L'ATR da solo: scende di una corsia rispetto a dove e' piazzato.
+    #[test]
+    fn atr_lowers_the_carrier_by_exactly_one_lane() {
+        let atr = atr();
+        let atr_position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
+        let carrier = carrier(CarrierType::WithTube);
+        let mut position = Vec3::new(DIVERT_ZONE_HALF_WIDTH, MAIN_LANE + LANE_HEIGHT, 0.0);
 
         for _ in 0..200 {
             position += carrier_step(&carrier, position, &[(&atr, atr_position)], DELTA);
         }
 
-        assert_eq!(
-            position.y, SOURCE_LANE,
-            "il flusso deve tornare sulla linea della sorgente"
-        );
+        assert_eq!(position.y, MAIN_LANE);
     }
 
     /// Il passo verticale si accorcia sull'ultimo tratto invece di scavalcare la quota.
@@ -239,9 +267,9 @@ mod tests {
     fn the_last_step_does_not_overshoot() {
         let atr = atr();
         let carrier = carrier(CarrierType::WithTube);
-        let almost_there = Vec3::new(0.0, SOURCE_LANE + 1.0, 0.0);
+        let almost_there = Vec3::new(0.0, MAIN_LANE + 1.0, 0.0);
 
-        let atr_position = Vec3::new(0.0, SOURCE_LANE, 0.0);
+        let atr_position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
         let step = carrier_step(&carrier, almost_there, &[(&atr, atr_position)], DELTA);
 
         assert_eq!(step.y, -1.0, "scende solo il px che manca");
@@ -262,15 +290,18 @@ mod tests {
         let live_atr = atr();
         let carrier = carrier(CarrierType::WithTube);
         let deviators = [
-            (&off_divert, Vec3::new(0.0, SOURCE_LANE, 0.0)),
-            (&live_atr, Vec3::new(-128.0, SOURCE_LANE + LANE_HEIGHT, 0.0)),
+            (&off_divert, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (
+                &live_atr,
+                Vec3::new(-2.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
+            ),
         ];
 
-        let mut position = Vec3::new(200.0, SOURCE_LANE, 0.0);
+        let mut position = Vec3::new(200.0, MAIN_LANE, 0.0);
         for _ in 0..400 {
             position += carrier_step(&carrier, position, &deviators, DELTA);
             assert_eq!(
-                position.y, SOURCE_LANE,
+                position.y, MAIN_LANE,
                 "il carrier non deve lasciare la corsia a x = {}",
                 position.x
             );
@@ -280,7 +311,7 @@ mod tests {
     #[test]
     fn empty_carriers_are_never_diverted() {
         let carrier = carrier(CarrierType::Empty);
-        let position = Vec3::new(0.0, SOURCE_LANE + LANE_HEIGHT, 0.0);
+        let position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
         let step = carrier_step(&carrier, position, &[(&atr(), position)], DELTA);
 
         assert_eq!(step.y, 0.0);
