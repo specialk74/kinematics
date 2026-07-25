@@ -2,13 +2,18 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::divert::DivertKind;
+use crate::divert::{Divert, DivertKind};
 use crate::editor::Tool;
+use crate::gate::Gate;
 use crate::piece::Facing;
+use crate::reverser::Reverser;
+use crate::source::CarrierSource;
+use crate::turner::Turner;
 
 /// File usato quando non se ne passa uno sulla riga di comando. Il percorso e'
 /// relativo alla cartella da cui si lancia il programma, non a dove sta l'eseguibile.
@@ -74,6 +79,54 @@ pub struct Layout {
 pub struct Placed {
     pub tool: Tool,
     pub cell: IVec2,
+}
+
+/// Gli oggetti che si accendono e si spengono. Raggrupparli evita di trascinare
+/// cinque query separate in ogni sistema che li tocca.
+#[derive(SystemParam)]
+pub struct Switches<'w, 's> {
+    sources: Query<'w, 's, &'static mut CarrierSource>,
+    gates: Query<'w, 's, &'static mut Gate>,
+    diverts: Query<'w, 's, &'static mut Divert>,
+    turners: Query<'w, 's, &'static mut Turner>,
+    reversers: Query<'w, 's, &'static mut Reverser>,
+}
+
+impl Switches<'_, '_> {
+    /// Stato dell'oggetto, se e' di quelli che si accendono.
+    pub fn get(&self, entity: Entity) -> Option<bool> {
+        if let Ok(source) = self.sources.get(entity) {
+            Some(source.active)
+        } else if let Ok(gate) = self.gates.get(entity) {
+            Some(gate.active)
+        } else if let Ok(divert) = self.diverts.get(entity) {
+            Some(divert.active)
+        } else if let Ok(turner) = self.turners.get(entity) {
+            Some(turner.active)
+        } else {
+            self.reversers.get(entity).ok().map(|r| r.active)
+        }
+    }
+
+    pub fn set(&mut self, entity: Entity, active: bool) {
+        if let Ok(mut source) = self.sources.get_mut(entity) {
+            source.active = active;
+        } else if let Ok(mut gate) = self.gates.get_mut(entity) {
+            gate.active = active;
+        } else if let Ok(mut divert) = self.diverts.get_mut(entity) {
+            divert.active = active;
+        } else if let Ok(mut turner) = self.turners.get_mut(entity) {
+            turner.active = active;
+        } else if let Ok(mut reverser) = self.reversers.get_mut(entity) {
+            reverser.active = active;
+        }
+    }
+
+    pub fn toggle(&mut self, entity: Entity) {
+        if let Some(active) = self.get(entity) {
+            self.set(entity, !active);
+        }
+    }
 }
 
 /// Costruisce la scena statica. Sta qui e non nell'editor perche' serve anche

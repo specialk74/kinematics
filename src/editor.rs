@@ -1,17 +1,11 @@
-use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::Carrier;
-use crate::divert::Divert;
-use crate::gate::Gate;
 use crate::grid;
-use crate::layout::{self, LayoutFile, Placed, place_in_cell, spawn_layout};
+use crate::layout::{self, LayoutFile, Placed, Switches, place_in_cell, spawn_layout};
 use crate::piece::{self, Facing, PieceShapes};
-use crate::reverser::Reverser;
-use crate::source::CarrierSource;
-use crate::turner::Turner;
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -191,32 +185,6 @@ fn cursor_cell(
     let position = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
 
     Some(grid::cell(position))
-}
-
-/// Gli oggetti che si accendono e si spengono. Raggrupparli evita di trascinare
-/// quattro query separate in ogni sistema che li commuta.
-#[derive(SystemParam)]
-struct Switches<'w, 's> {
-    sources: Query<'w, 's, &'static mut CarrierSource>,
-    gates: Query<'w, 's, &'static mut Gate>,
-    diverts: Query<'w, 's, &'static mut Divert>,
-    turners: Query<'w, 's, &'static mut Turner>,
-    reversers: Query<'w, 's, &'static mut Reverser>,
-}
-
-/// Accende o spegne l'oggetto, qualunque dei tipi commutabili sia.
-fn toggle_object(entity: Entity, switches: &mut Switches) {
-    if let Ok(mut source) = switches.sources.get_mut(entity) {
-        source.active = !source.active;
-    } else if let Ok(mut gate) = switches.gates.get_mut(entity) {
-        gate.active = !gate.active;
-    } else if let Ok(mut divert) = switches.diverts.get_mut(entity) {
-        divert.active = !divert.active;
-    } else if let Ok(mut turner) = switches.turners.get_mut(entity) {
-        turner.active = !turner.active;
-    } else if let Ok(mut reverser) = switches.reversers.get_mut(entity) {
-        reverser.active = !reverser.active;
-    }
 }
 
 pub struct EditorPlugin;
@@ -486,7 +454,7 @@ fn place_selected_tool(
         // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
         // aggiorna il modulo dell'oggetto guardando lo stato.
         if occupant == tool {
-            toggle_object(entity, &mut switches);
+            switches.toggle(entity);
             return;
         }
 
@@ -544,7 +512,7 @@ fn toggle_by_click(
         return;
     };
 
-    toggle_object(entity, &mut switches);
+    switches.toggle(entity);
 }
 
 /// Mostra sul bottone Salva com'e' andata, e dopo qualche secondo lo rimette

@@ -8,8 +8,8 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
-use crate::editor::{BUTTON_IDLE, button_label, top_button};
-use crate::layout::{Layout, Placed, spawn_layout};
+use crate::editor::{BUTTON_IDLE, PALETTE_WIDTH, button_label, top_button};
+use crate::layout::{Layout, Placed, Switches, spawn_layout};
 use crate::piece::Facing;
 use crate::simulation::SimulationState;
 
@@ -18,6 +18,23 @@ use crate::simulation::SimulationState;
 const TRACE_FPS: f32 = 20.0;
 const RECORDING_COLOR: Color = Color::srgb(0.70, 0.15, 0.15);
 const REPLAYING_COLOR: Color = Color::srgb(0.25, 0.45, 0.80);
+/// Per quanto tempo il bottone spiega perche' non e' partito niente.
+const NOTICE_SECONDS: f32 = 2.0;
+const NOTICE_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
+
+/// Messaggio momentaneo sul bottone Riproduci. Senza, chi preme e non vede
+/// accadere niente non ha modo di sapere perche': il log non ce l'ha davanti.
+#[derive(Resource, Default)]
+struct ReplayNotice(Option<(&'static str, Timer)>);
+
+impl ReplayNotice {
+    fn show(&mut self, message: &'static str) {
+        self.0 = Some((
+            message,
+            Timer::from_seconds(NOTICE_SECONDS, TimerMode::Once),
+        ));
+    }
+}
 
 /// Dove si trovava un carrier in un certo istante.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -27,10 +44,13 @@ pub struct TracedCarrier {
     pub at: (f32, f32),
 }
 
-/// Un istante della simulazione: chi c'era e dove.
+/// Un istante della simulazione: chi c'era, dove, e come erano messi gli
+/// interruttori. Gli oggetti sono indicati per cella e non per posizione
+/// nell'elenco: cosi' l'istante si legge da solo, senza dover contare.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct TraceFrame {
     pub carriers: Vec<TracedCarrier>,
+    pub switches: Vec<((i32, i32), bool)>,
 }
 
 /// Una registrazione completa. Contiene anche il layout, cosi' il file e' lo
@@ -111,6 +131,14 @@ struct RecordButton;
 #[derive(Component)]
 struct RecordLabel;
 
+/// La barra sotto: mostra a che punto e' la riproduzione e permette di
+/// spostarsi avanti e indietro.
+#[derive(Component)]
+struct ScrubBar;
+
+#[derive(Component)]
+struct ScrubFill;
+
 #[derive(Component)]
 struct ReplayButton;
 
@@ -123,6 +151,7 @@ impl Plugin for TracePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Recording>()
             .init_resource::<Replay>()
+            .init_resource::<ReplayNotice>()
             .add_systems(Startup, setup_trace_buttons)
             .add_systems(
                 Update,
@@ -132,6 +161,7 @@ impl Plugin for TracePlugin {
                     toggle_replay,
                     play_frames.run_if(in_state(SimulationState::Replaying)),
                     refresh_buttons,
+                    scrub,
                 ),
             )
             // Chiudere la finestra mentre si registra non deve buttare via
@@ -153,6 +183,86 @@ fn setup_trace_buttons(mut commands: Commands) {
         ReplayButton,
         children![(button_label("Riproduci"), ReplayLabel)],
     ));
+
+    commands.spawn((
+        Button,
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(12.0),
+            left: Val::Px(PALETTE_WIDTH + 12.0),
+            right: Val::Px(12.0),
+            height: Val::Px(22.0),
+            ..default()
+        },
+        BackgroundColor(BUTTON_IDLE),
+        // Nasce nascosta: senza una registrazione in corso non ha niente da dire.
+        Visibility::Hidden,
+        ScrubBar,
+        children![(
+            Node {
+                width: Val::Percent(0.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(REPLAYING_COLOR),
+            ScrubFill,
+        )],
+    ));
+}
+
+/// Tiene la barra allineata alla riproduzione, e la usa come comando: premendo
+/// dentro si salta a quell'istante. E' il modo per tornare indietro a guardare
+/// di nuovo il punto che interessa, cosa che un filmato non permette di fare
+/// con la stessa precisione.
+fn scrub(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    state: Res<State<SimulationState>>,
+    mut replay: ResMut<Replay>,
+    mut bars: Query<
+        (
+            &Interaction,
+            &ComputedNode,
+            &GlobalTransform,
+            &mut Visibility,
+        ),
+        With<ScrubBar>,
+    >,
+    mut fills: Query<&mut Node, With<ScrubFill>>,
+) {
+    let replaying = *state.get() == SimulationState::Replaying;
+
+    let Ok((interaction, node, transform, mut visibility)) = bars.single_mut() else {
+        return;
+    };
+    *visibility = if replaying {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+
+    let Some(total) = replay.trace.as_ref().map(|trace| trace.frames.len()) else {
+        return;
+    };
+    if total == 0 {
+        return;
+    }
+
+    // Basta che il tasto sia premuto sopra la barra: cosi' si puo' trascinare
+    // avanti e indietro invece di dover cliccare punto per punto.
+    if mouse.pressed(MouseButton::Left) && *interaction != Interaction::None {
+        if let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) {
+            let width = node.size().x;
+            let left = transform.translation().x - width / 2.0;
+            let fraction = ((cursor.x - left) / width).clamp(0.0, 1.0);
+
+            replay.next_frame = (fraction * total as f32) as usize;
+        }
+    }
+
+    for mut fill in fills.iter_mut() {
+        fill.width = Val::Percent(100.0 * replay.next_frame as f32 / total as f32);
+    }
 }
 
 fn pressed<Button: Component>(
@@ -208,6 +318,8 @@ fn record_frames(
     time: Res<Time>,
     mut recording: ResMut<Recording>,
     carriers: Query<(&Carrier, &Transform)>,
+    placed: Query<(Entity, &Placed)>,
+    switches: Switches,
 ) {
     if !recording.active {
         return;
@@ -226,6 +338,14 @@ fn record_frames(
                 id: carrier.carrier_id,
                 kind: carrier.kind,
                 at: (transform.translation.x, transform.translation.y),
+            })
+            .collect(),
+        switches: placed
+            .iter()
+            .filter_map(|(entity, placed)| {
+                switches
+                    .get(entity)
+                    .map(|active| ((placed.cell.x, placed.cell.y), active))
             })
             .collect(),
     };
@@ -250,7 +370,9 @@ fn toggle_replay(
     mut replay: ResMut<Replay>,
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
+    mut notice: ResMut<ReplayNotice>,
     carriers: Query<Entity, With<Carrier>>,
+    placed: Query<(Entity, &Placed)>,
 ) {
     if !pressed(&buttons) {
         return;
@@ -266,18 +388,30 @@ fn toggle_replay(
     match newest_trace() {
         Some(path) => match load(&path) {
             Ok(trace) => {
-                // Il nastro va sgombrato: quello che si vedra' arriva tutto dal
-                // file, e i carrier vivi si sovrapporrebbero.
+                // Si sgombra tutto: quello che si vedra' arriva dal file,
+                // impianto compreso. Riprodurre una registrazione sopra un
+                // layout diverso mostrerebbe carrier che sfilano fra oggetti
+                // che non c'entrano.
                 for entity in carriers.iter() {
                     commands.entity(entity).despawn();
                 }
+                for (entity, _) in placed.iter() {
+                    commands.entity(entity).despawn();
+                }
+                spawn_layout(&mut commands, &trace.layout);
 
                 replay.start(trace);
                 next_state.set(SimulationState::Replaying);
             }
-            Err(error) => error!("non riesco a leggere {path}: {error}"),
+            Err(error) => {
+                error!("non riesco a leggere {path}: {error}");
+                notice.show("Illeggibile");
+            }
         },
-        None => warn!("nessuna registrazione da riprodurre"),
+        None => {
+            warn!("nessuna registrazione da riprodurre: prima serve un Registra");
+            notice.show("Nessuna");
+        }
     }
 }
 
@@ -304,6 +438,8 @@ fn play_frames(
     mut next_state: ResMut<NextState<SimulationState>>,
     carriers: Query<(Entity, &Carrier)>,
     mut positions: Query<&mut Transform>,
+    placed: Query<(Entity, &Placed)>,
+    mut switches: Switches,
 ) {
     let Some(fps) = replay.trace.as_ref().map(|trace| trace.fps) else {
         return;
@@ -356,18 +492,41 @@ fn play_frames(
     for entity in live.into_values() {
         commands.entity(entity).despawn();
     }
+
+    // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
+    // deve richiudersi anche qui, altrimenti la scena non spiega piu' la coda
+    // che si vede.
+    for ((x, y), active) in &frame.switches {
+        let cell = IVec2::new(*x, *y);
+
+        if let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) {
+            switches.set(entity, *active);
+        }
+    }
 }
 
 fn refresh_buttons(
+    time: Res<Time>,
     recording: Res<Recording>,
     state: Res<State<SimulationState>>,
+    mut notice: ResMut<ReplayNotice>,
     mut record_buttons: Query<&mut BackgroundColor, (With<RecordButton>, Without<ReplayButton>)>,
     mut replay_buttons: Query<&mut BackgroundColor, (With<ReplayButton>, Without<RecordButton>)>,
     mut record_labels: Query<&mut Text, (With<RecordLabel>, Without<ReplayLabel>)>,
     mut replay_labels: Query<&mut Text, (With<ReplayLabel>, Without<RecordLabel>)>,
 ) {
-    if !recording.is_changed() && !state.is_changed() {
-        return;
+    // Il messaggio momentaneo va fatto scorrere a ogni frame, quindi qui non si
+    // puo' uscire in fretta quando nulla e' cambiato.
+    let mut pending = None;
+    if let Some((message, timer)) = notice.0.as_mut() {
+        timer.tick(time.delta());
+        let message = *message;
+
+        if timer.is_finished() {
+            notice.0 = None;
+        } else {
+            pending = Some(message);
+        }
     }
 
     let replaying = *state.get() == SimulationState::Replaying;
@@ -383,15 +542,19 @@ fn refresh_buttons(
         label.0 = if recording.active { "Stop" } else { "Registra" }.to_string();
     }
 
+    // Un messaggio in corso ha la precedenza: e' l'unico momento in cui il
+    // bottone deve spiegare qualcosa invece di dire cosa fa.
+    let (colour, text) = match (pending, replaying) {
+        (Some(message), _) => (NOTICE_COLOR, message),
+        (None, true) => (REPLAYING_COLOR, "Stop"),
+        (None, false) => (BUTTON_IDLE, "Riproduci"),
+    };
+
     for mut background in replay_buttons.iter_mut() {
-        background.0 = if replaying {
-            REPLAYING_COLOR
-        } else {
-            BUTTON_IDLE
-        };
+        background.0 = colour;
     }
     for mut label in replay_labels.iter_mut() {
-        label.0 = if replaying { "Stop" } else { "Riproduci" }.to_string();
+        label.0 = text.to_string();
     }
 }
 
@@ -436,6 +599,7 @@ mod tests {
                         kind: CarrierType::WithTube,
                         at: (10.0, -20.0),
                     }],
+                    switches: vec![((3, 0), true)],
                 },
                 TraceFrame {
                     carriers: vec![TracedCarrier {
@@ -443,6 +607,8 @@ mod tests {
                         kind: CarrierType::WithTube,
                         at: (5.0, -20.0),
                     }],
+                    // Nel secondo istante il gate e' stato chiuso.
+                    switches: vec![((3, 0), false)],
                 },
             ],
         }
@@ -469,5 +635,19 @@ mod tests {
         let written = to_ron(&sample()).expect("scrittura");
 
         assert!(written.contains("layout"), "{written}");
+    }
+
+    /// Gli interruttori sono registrati istante per istante: quello che si
+    /// rivede non e' solo dove passavano i carrier, ma anche perche'.
+    #[test]
+    fn the_state_of_the_objects_travels_with_each_moment() {
+        let trace = sample();
+
+        assert_eq!(trace.frames[0].switches, vec![((3, 0), true)]);
+        assert_eq!(trace.frames[1].switches, vec![((3, 0), false)]);
+
+        let reread = from_ron(&to_ron(&trace).expect("scrittura")).expect("rilettura");
+
+        assert_eq!(reread.frames[1].switches, trace.frames[1].switches);
     }
 }
