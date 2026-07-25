@@ -4,6 +4,7 @@ use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
+use clap::Parser;
 
 mod carrier;
 mod cli;
@@ -40,10 +41,11 @@ pub const WORK_AREA_BOTTOM: f32 = -(HEIGTH as f32) / 2.0;
 const HEADLESS_STEP: Duration = Duration::from_micros(16_667);
 
 fn main() {
-    let options = Options::from_args(std::env::args().skip(1));
+    // clap si occupa anche di `--help` e degli errori sugli argomenti sbagliati.
+    let options = Options::parse();
 
     let mut app = App::new();
-    app.insert_resource(options.layout);
+    app.insert_resource(options.layout_file());
 
     // La simulazione e' la stessa nei due casi: cambia solo chi la guarda.
     if options.hide_gui {

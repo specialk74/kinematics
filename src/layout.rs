@@ -23,11 +23,10 @@ pub struct LayoutFile {
 }
 
 impl LayoutFile {
-    /// Legge il primo argomento della riga di comando. Il file indicato viene
-    /// caricato all'avvio e diventa anche il bersaglio dei due bottoni: passare
-    /// un nome equivale a scegliere su cosa si sta lavorando.
-    pub fn from_args(mut args: impl Iterator<Item = String>) -> Self {
-        match args.next() {
+    /// Un file indicato esplicitamente viene caricato all'avvio e diventa anche
+    /// il bersaglio dei due bottoni: sceglierlo equivale a dire su cosa si lavora.
+    pub fn new(path: Option<String>) -> Self {
+        match path {
             Some(path) => LayoutFile {
                 path,
                 load_at_startup: true,
@@ -193,32 +192,29 @@ mod tests {
     }
 
     #[test]
-    fn the_command_line_chooses_the_file() {
-        let chosen = LayoutFile::from_args(["impianto.ron".to_string()].into_iter());
+    fn a_chosen_file_opens_by_itself() {
+        let chosen = LayoutFile::new(Some("impianto.ron".to_string()));
 
         assert_eq!(chosen.path, "impianto.ron");
-        assert!(chosen.load_at_startup, "il file passato si apre da solo");
+        assert!(chosen.load_at_startup);
     }
 
     #[test]
     fn the_label_shows_the_file_name_not_the_whole_path() {
-        let nested = LayoutFile::from_args(["/tmp/impianti/linea2.ron".to_string()].into_iter());
+        let nested = LayoutFile::new(Some("/tmp/impianti/linea2.ron".to_string()));
 
         assert_eq!(nested.display_name(), "linea2.ron");
-        assert_eq!(
-            LayoutFile::from_args(std::iter::empty()).display_name(),
-            DEFAULT_LAYOUT_PATH
-        );
+        assert_eq!(LayoutFile::new(None).display_name(), DEFAULT_LAYOUT_PATH);
     }
 
     #[test]
-    fn without_arguments_the_scene_starts_empty() {
-        let fallback = LayoutFile::from_args(std::iter::empty());
+    fn the_default_file_is_not_opened_on_its_own() {
+        let fallback = LayoutFile::new(None);
 
         assert_eq!(fallback.path, DEFAULT_LAYOUT_PATH);
         assert!(
             !fallback.load_at_startup,
-            "senza argomenti non si carica niente all'avvio"
+            "senza scelta esplicita non si carica niente all'avvio"
         );
     }
 }
