@@ -248,6 +248,32 @@ mod tests {
         );
     }
 
+    /// Un divert spento non deve deviare niente, nemmeno con un ATR acceso poco
+    /// piu' avanti che potrebbe agganciare lo stesso carrier.
+    #[test]
+    fn a_switched_off_divert_leaves_the_flow_alone() {
+        let off_divert = Divert {
+            kind: DivertKind::Divert,
+            active: false,
+        };
+        let live_atr = atr();
+        let carrier = carrier(CarrierType::WithTube);
+        let deviators = [
+            (&off_divert, Vec3::new(0.0, SOURCE_LANE, 0.0)),
+            (&live_atr, Vec3::new(-128.0, SOURCE_LANE + LANE_HEIGHT, 0.0)),
+        ];
+
+        let mut position = Vec3::new(200.0, SOURCE_LANE, 0.0);
+        for _ in 0..400 {
+            position += carrier_step(&carrier, position, &deviators, DELTA);
+            assert_eq!(
+                position.y, SOURCE_LANE,
+                "il carrier non deve lasciare la corsia a x = {}",
+                position.x
+            );
+        }
+    }
+
     #[test]
     fn empty_carriers_are_never_diverted() {
         let carrier = carrier(CarrierType::Empty);

@@ -1,14 +1,19 @@
 use bevy::prelude::*;
+use bevy::sprite_render::AlphaMode2d;
 
 use crate::WORK_AREA_LEFT;
-use crate::divert::{Divert, DivertAssets, DivertKind, spawn_divert, toggle_divert_at};
-use crate::gate::{Gate, GateAssets, spawn_gate, toggle_gate_at};
-use crate::source::{SourceAssets, spawn_source};
+use crate::divert::{self, Divert, DivertAssets, DivertKind, spawn_divert, toggle_divert};
+use crate::gate::{self, Gate, GateAssets, spawn_gate, toggle_gate};
+use crate::grid;
+use crate::source::{self, SourceAssets, spawn_source};
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
 const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
+/// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto
+/// gia' piazzato, che e' proprio il caso in cui serve di piu'.
+const GHOST_Z: f32 = 2.0;
 
 /// Gli oggetti che si possono piazzare nella scena.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,15 +51,66 @@ impl Default for SelectedTool {
 #[derive(Component)]
 struct ToolButton(Tool);
 
+/// Oggetto appoggiato sulla griglia. Tiene la cella e lo strumento che l'ha
+/// creato: bastano a sapere cosa c'e' in una cella senza interrogare i singoli
+/// moduli, e a decidere se un clic sostituisce o commuta.
+#[derive(Component)]
+struct Placed {
+    tool: Tool,
+    cell: IVec2,
+}
+
+/// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse ora.
+#[derive(Component)]
+struct Ghost;
+
+#[derive(Resource)]
+struct GhostMaterial(Handle<ColorMaterial>);
+
+/// Cella della griglia sotto il mouse, se il mouse e' sull'area di lavoro.
+/// La usano sia l'anteprima sia il piazzamento: e' cosi' che l'oggetto finisce
+/// per forza dove l'anteprima l'aveva mostrato.
+fn cursor_cell(
+    windows: &Query<&Window>,
+    camera_query: &Query<(&Camera, &GlobalTransform)>,
+) -> Option<IVec2> {
+    let window = windows.single().ok()?;
+    let cursor = window.cursor_position()?;
+    let (camera, camera_transform) = camera_query.single().ok()?;
+    let position = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
+
+    // Sulla barra non si piazza niente: quei clic sono dei bottoni.
+    (position.x >= WORK_AREA_LEFT).then(|| grid::cell(position))
+}
+
+fn tool_shape(
+    tool: Tool,
+    source_assets: &SourceAssets,
+    gate_assets: &GateAssets,
+    divert_assets: &DivertAssets,
+) -> (Handle<Mesh>, Quat) {
+    match tool {
+        Tool::CarrierSource => source::shape(source_assets),
+        Tool::Gate => gate::shape(gate_assets),
+        Tool::Divert => divert::shape(divert_assets, DivertKind::Divert),
+        Tool::Atr => divert::shape(divert_assets, DivertKind::Atr),
+    }
+}
+
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
-            .add_systems(Startup, setup_palette)
+            .add_systems(Startup, (setup_palette, setup_ghost_material))
             .add_systems(
                 Update,
-                (select_tool, highlight_selected_tool, place_selected_tool),
+                (
+                    select_tool,
+                    highlight_selected_tool,
+                    update_ghost,
+                    place_selected_tool,
+                ),
             );
     }
 }
@@ -98,6 +154,59 @@ fn setup_palette(mut commands: Commands) {
         });
 }
 
+fn setup_ghost_material(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
+    commands.insert_resource(GhostMaterial(materials.add(ColorMaterial {
+        color: Color::srgba(1.0, 1.0, 1.0, 0.35),
+        alpha_mode: AlphaMode2d::Blend,
+        ..default()
+    })));
+}
+
+/// Tiene l'anteprima agganciata alla cella sotto il mouse e le da' la forma
+/// dello strumento selezionato. Sparisce quando il mouse esce dall'area di lavoro.
+fn update_ghost(
+    mut commands: Commands,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    selected: Res<SelectedTool>,
+    ghost_material: Res<GhostMaterial>,
+    source_assets: Res<SourceAssets>,
+    gate_assets: Res<GateAssets>,
+    divert_assets: Res<DivertAssets>,
+    mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
+) {
+    let Some(cell) = cursor_cell(&windows, &camera_query) else {
+        if let Ok((_, mut visibility, _)) = ghost.single_mut() {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
+
+    let (mesh, rotation) = tool_shape(selected.0, &source_assets, &gate_assets, &divert_assets);
+    let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
+        .with_rotation(rotation);
+
+    match ghost.single_mut() {
+        Ok((mut ghost_transform, mut visibility, mut ghost_mesh)) => {
+            *ghost_transform = transform;
+            *visibility = Visibility::Visible;
+            if ghost_mesh.0 != mesh {
+                ghost_mesh.0 = mesh;
+            }
+        }
+        // Nasce al primo frame utile: negli Startup l'ordine fra i setup degli
+        // asset non e' garantito, qui invece ci sono di sicuro.
+        Err(_) => {
+            commands.spawn((
+                Mesh2d(mesh),
+                MeshMaterial2d(ghost_material.0.clone()),
+                transform,
+                Ghost,
+            ));
+        }
+    }
+}
+
 fn select_tool(
     buttons: Query<(&Interaction, &ToolButton), Changed<Interaction>>,
     mut selected: ResMut<SelectedTool>,
@@ -126,19 +235,18 @@ fn highlight_selected_tool(
     }
 }
 
-/// Clic nell'area di lavoro: piazza lo strumento attivo. Fanno eccezione i clic
-/// su un gate o su un divert gia' esistenti, che ne commutano lo stato invece di
-/// sovrapporne un altro: e' l'unico modo per accenderli e spegnerli.
+/// Clic nell'area di lavoro: l'oggetto viene appoggiato al centro della cella
+/// puntata. Se la cella e' gia' occupata il nuovo oggetto prende il posto del
+/// vecchio, tranne quando lo strumento e' lo stesso: in quel caso il clic serve
+/// ad accendere e spegnere quello che c'e' gia'.
 fn place_selected_tool(
     mut commands: Commands,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut gates: Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>), Without<Divert>>,
-    mut diverts: Query<
-        (&mut Divert, &Transform, &mut MeshMaterial2d<ColorMaterial>),
-        Without<Gate>,
-    >,
+    placed: Query<(Entity, &Placed)>,
+    mut gates: Query<(&mut Gate, &mut MeshMaterial2d<ColorMaterial>), Without<Divert>>,
+    mut diverts: Query<(&mut Divert, &mut MeshMaterial2d<ColorMaterial>), Without<Gate>>,
     gate_assets: Res<GateAssets>,
     divert_assets: Res<DivertAssets>,
     source_assets: Res<SourceAssets>,
@@ -148,35 +256,36 @@ fn place_selected_tool(
         return;
     }
 
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-    let Ok(position) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+    let Some(cell) = cursor_cell(&windows, &camera_query) else {
         return;
     };
 
-    // Il clic sulla barra e' gia' gestito dai bottoni: qui si lavora solo sulla scena.
-    if position.x < WORK_AREA_LEFT {
-        return;
-    }
+    let tool = selected.0;
 
-    if toggle_gate_at(position, &mut gates, &gate_assets)
-        || toggle_divert_at(position, &mut diverts, &divert_assets)
+    if let Some((entity, occupant)) = placed
+        .iter()
+        .find(|(_, occupant)| occupant.cell == cell)
+        .map(|(entity, occupant)| (entity, occupant.tool))
     {
-        return;
+        if occupant == tool {
+            if let Ok((mut gate, mut material)) = gates.get_mut(entity) {
+                toggle_gate(&mut gate, &mut material, &gate_assets);
+            } else if let Ok((mut divert, mut material)) = diverts.get_mut(entity) {
+                toggle_divert(&mut divert, &mut material, &divert_assets);
+            }
+            return;
+        }
+
+        commands.entity(entity).despawn();
     }
 
-    let position = position.extend(1.0);
-    match selected.0 {
+    let position = grid::cell_center(cell).extend(1.0);
+    let object = match tool {
         Tool::CarrierSource => spawn_source(&mut commands, &source_assets, position),
         Tool::Gate => spawn_gate(&mut commands, &gate_assets, position),
         Tool::Divert => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Divert),
         Tool::Atr => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Atr),
-    }
+    };
+
+    commands.entity(object).insert(Placed { tool, cell });
 }

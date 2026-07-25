@@ -1,6 +1,5 @@
 use std::f32::consts::PI;
 
-use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 
 pub const DIVERT_SIZE: f32 = 30.0;
@@ -85,54 +84,48 @@ fn setup_divert_assets(
     });
 }
 
-/// Piazza un deviatore gia' attivo. Il triangolo punta nel verso della deviazione.
+/// Mesh e orientamento del deviatore: il triangolo punta nel verso della
+/// deviazione. La usa anche l'anteprima dell'editor.
+pub fn shape(assets: &DivertAssets, kind: DivertKind) -> (Handle<Mesh>, Quat) {
+    let rotation = match kind {
+        DivertKind::Divert => Quat::IDENTITY,
+        DivertKind::Atr => Quat::from_rotation_z(PI),
+    };
+
+    (assets.mesh.clone(), rotation)
+}
+
+/// Piazza un deviatore gia' attivo.
 pub fn spawn_divert(
     commands: &mut Commands,
     assets: &DivertAssets,
     position: Vec3,
     kind: DivertKind,
-) {
-    let rotation = match kind {
-        DivertKind::Divert => 0.0,
-        DivertKind::Atr => PI,
-    };
+) -> Entity {
+    let (mesh, rotation) = shape(assets, kind);
 
-    commands.spawn((
-        Mesh2d(assets.mesh.clone()),
-        MeshMaterial2d(assets.active_material.clone()),
-        Transform::from_translation(position).with_rotation(Quat::from_rotation_z(rotation)),
-        Divert { kind, active: true },
-    ));
+    commands
+        .spawn((
+            Mesh2d(mesh),
+            MeshMaterial2d(assets.active_material.clone()),
+            Transform::from_translation(position).with_rotation(rotation),
+            Divert { kind, active: true },
+        ))
+        .id()
 }
 
-/// Commuta il deviatore sotto al punto indicato, colore compreso. Restituisce
-/// `false` se li' non c'e' niente, cosi' chi chiama sa che il clic e' ancora libero.
-pub fn toggle_divert_at<F: QueryFilter>(
-    position: Vec2,
-    diverts: &mut Query<(&mut Divert, &Transform, &mut MeshMaterial2d<ColorMaterial>), F>,
+/// Accende o spegne il deviatore, colore compreso.
+pub fn toggle_divert(
+    divert: &mut Divert,
+    material: &mut MeshMaterial2d<ColorMaterial>,
     assets: &DivertAssets,
-) -> bool {
-    for (mut divert, transform, mut material) in diverts.iter_mut() {
-        if contains(transform.translation, position) {
-            divert.active = !divert.active;
-            material.0 = if divert.active {
-                assets.active_material.clone()
-            } else {
-                assets.idle_material.clone()
-            };
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Vero se il punto cade sul deviatore (usato per i click).
-fn contains(divert: Vec3, point: Vec2) -> bool {
-    (point - divert.truncate())
-        .abs()
-        .cmple(Vec2::splat(DIVERT_SIZE / 2.0))
-        .all()
+) {
+    divert.active = !divert.active;
+    material.0 = if divert.active {
+        assets.active_material.clone()
+    } else {
+        assets.idle_material.clone()
+    };
 }
 
 #[cfg(test)]

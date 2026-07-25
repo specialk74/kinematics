@@ -1,4 +1,3 @@
-use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 
 pub const GATE_WIDTH: f32 = 8.0;
@@ -48,43 +47,38 @@ pub fn blocks_circle(gate: Vec3, point: Vec3, radius: f32) -> bool {
     distance.max(Vec2::ZERO).length() < radius
 }
 
-/// Vero se il punto cade dentro il rettangolo del gate (usato per i click).
-fn contains(gate: Vec3, point: Vec2) -> bool {
-    let half_gate = Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0;
-    (point - gate.truncate()).abs().cmple(half_gate).all()
+/// Mesh e orientamento del gate, condivisi con l'anteprima dell'editor.
+pub fn shape(assets: &GateAssets) -> (Handle<Mesh>, Quat) {
+    (assets.mesh.clone(), Quat::IDENTITY)
 }
 
 /// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
 /// resta visibile quando si accodano.
-pub fn spawn_gate(commands: &mut Commands, assets: &GateAssets, position: Vec3) {
-    commands.spawn((
-        Mesh2d(assets.mesh.clone()),
-        MeshMaterial2d(assets.active_material.clone()),
-        Transform::from_translation(position),
-        Gate { active: true },
-    ));
+pub fn spawn_gate(commands: &mut Commands, assets: &GateAssets, position: Vec3) -> Entity {
+    let (mesh, rotation) = shape(assets);
+
+    commands
+        .spawn((
+            Mesh2d(mesh),
+            MeshMaterial2d(assets.active_material.clone()),
+            Transform::from_translation(position).with_rotation(rotation),
+            Gate { active: true },
+        ))
+        .id()
 }
 
-/// Commuta il gate sotto al punto indicato, colore compreso. Restituisce `false`
-/// se li' non c'e' nessun gate, cosi' chi chiama sa che il clic e' ancora libero.
-pub fn toggle_gate_at<F: QueryFilter>(
-    position: Vec2,
-    gates: &mut Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>), F>,
+/// Accende o spegne il gate, colore compreso.
+pub fn toggle_gate(
+    gate: &mut Gate,
+    material: &mut MeshMaterial2d<ColorMaterial>,
     assets: &GateAssets,
-) -> bool {
-    for (mut gate, transform, mut material) in gates.iter_mut() {
-        if contains(transform.translation, position) {
-            gate.active = !gate.active;
-            material.0 = if gate.active {
-                assets.active_material.clone()
-            } else {
-                assets.idle_material.clone()
-            };
-            return true;
-        }
-    }
-
-    false
+) {
+    gate.active = !gate.active;
+    material.0 = if gate.active {
+        assets.active_material.clone()
+    } else {
+        assets.idle_material.clone()
+    };
 }
 
 #[cfg(test)]
@@ -112,14 +106,5 @@ mod tests {
             "gate fuori dal flusso: non deve bloccare nessuno"
         );
         assert!(!blocks_circle(off_belt, carrier_far, CARRIER_RADIUS));
-    }
-
-    #[test]
-    fn click_toggles_only_the_gate_under_the_cursor() {
-        let gate = Vec3::new(100.0, 0.0, 1.0);
-
-        assert!(contains(gate, Vec2::new(100.0, 10.0)));
-        assert!(!contains(gate, Vec2::new(100.0, 40.0)));
-        assert!(!contains(gate, Vec2::new(120.0, 0.0)));
     }
 }

@@ -40,17 +40,26 @@ fn setup_source_assets(
     });
 }
 
-/// Piazza una sorgente. Il triangolo e' ruotato per puntare a sinistra, cioe'
-/// nel verso in cui partono i carrier.
-pub fn spawn_source(commands: &mut Commands, assets: &SourceAssets, position: Vec3) {
-    commands.spawn((
-        Mesh2d(assets.mesh.clone()),
-        MeshMaterial2d(assets.material.clone()),
-        Transform::from_translation(position).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-        CarrierSource {
-            timer: Timer::from_seconds(CARRIER_SPAWN_TIME, TimerMode::Repeating),
-        },
-    ));
+/// Mesh e orientamento della sorgente: il triangolo punta a sinistra, nel verso
+/// in cui partono i carrier. La usa anche l'anteprima dell'editor, cosi' quello
+/// che si vede prima del clic non puo' discostarsi da quello che viene piazzato.
+pub fn shape(assets: &SourceAssets) -> (Handle<Mesh>, Quat) {
+    (assets.mesh.clone(), Quat::from_rotation_z(FRAC_PI_2))
+}
+
+pub fn spawn_source(commands: &mut Commands, assets: &SourceAssets, position: Vec3) -> Entity {
+    let (mesh, rotation) = shape(assets);
+
+    commands
+        .spawn((
+            Mesh2d(mesh),
+            MeshMaterial2d(assets.material.clone()),
+            Transform::from_translation(position).with_rotation(rotation),
+            CarrierSource {
+                timer: Timer::from_seconds(CARRIER_SPAWN_TIME, TimerMode::Repeating),
+            },
+        ))
+        .id()
 }
 
 fn spawn_from_sources(
