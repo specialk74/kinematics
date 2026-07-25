@@ -4,6 +4,7 @@ use rand::prelude::*;
 use crate::WORK_AREA_LEFT;
 use crate::divert::{DIVERT_ZONE_HALF_WIDTH, Divert};
 use crate::gate::{Gate, blocks_circle};
+use crate::simulation::SimulationState;
 
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
@@ -35,8 +36,10 @@ pub struct CarrierPlugin;
 
 impl Plugin for CarrierPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_carrier_assets)
-            .add_systems(Update, (move_carrier, despawn_offscreen));
+        app.add_systems(Startup, setup_carrier_assets).add_systems(
+            Update,
+            (move_carrier, despawn_offscreen).run_if(in_state(SimulationState::Running)),
+        );
     }
 }
 

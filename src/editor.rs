@@ -73,13 +73,23 @@ struct GhostMaterial(Handle<ColorMaterial>);
 fn cursor_cell(
     windows: &Query<&Window>,
     camera_query: &Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: &Query<&Interaction>,
 ) -> Option<IVec2> {
+    // I bottoni galleggiano sopra la scena (play/pausa in alto a destra), quindi
+    // non basta escludere la barra: se il mouse e' su un bottone quel clic e' suo.
+    if ui_interactions
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        return None;
+    }
+
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
     let (camera, camera_transform) = camera_query.single().ok()?;
     let position = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
 
-    // Sulla barra non si piazza niente: quei clic sono dei bottoni.
+    // Sulla barra degli strumenti non si piazza niente.
     (position.x >= WORK_AREA_LEFT).then(|| grid::cell(position))
 }
 
@@ -173,9 +183,10 @@ fn update_ghost(
     source_assets: Res<SourceAssets>,
     gate_assets: Res<GateAssets>,
     divert_assets: Res<DivertAssets>,
+    ui_interactions: Query<&Interaction>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
-    let Some(cell) = cursor_cell(&windows, &camera_query) else {
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
         if let Ok((_, mut visibility, _)) = ghost.single_mut() {
             *visibility = Visibility::Hidden;
         }
@@ -245,6 +256,7 @@ fn place_selected_tool(
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     placed: Query<(Entity, &Placed)>,
+    ui_interactions: Query<&Interaction>,
     mut gates: Query<(&mut Gate, &mut MeshMaterial2d<ColorMaterial>), Without<Divert>>,
     mut diverts: Query<(&mut Divert, &mut MeshMaterial2d<ColorMaterial>), Without<Gate>>,
     gate_assets: Res<GateAssets>,
@@ -256,7 +268,7 @@ fn place_selected_tool(
         return;
     }
 
-    let Some(cell) = cursor_cell(&windows, &camera_query) else {
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
         return;
     };
 

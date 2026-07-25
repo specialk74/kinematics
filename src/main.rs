@@ -5,6 +5,7 @@ mod divert;
 mod editor;
 mod gate;
 mod grid;
+mod simulation;
 mod source;
 
 use carrier::CarrierPlugin;
@@ -12,6 +13,7 @@ use divert::DivertPlugin;
 use editor::{EditorPlugin, PALETTE_WIDTH};
 use gate::GatePlugin;
 use grid::GridPlugin;
+use simulation::SimulationPlugin;
 use source::SourcePlugin;
 
 pub const WIDTH: u32 = 1024;
@@ -31,6 +33,7 @@ fn main() {
             ..Default::default()
         }))
         .add_plugins((
+            SimulationPlugin,
             GridPlugin,
             CarrierPlugin,
             SourcePlugin,

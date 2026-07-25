@@ -3,6 +3,7 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_SIZE, Carrier, CarrierAssets, spawn_random_carrier};
+use crate::simulation::SimulationState;
 
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 pub const SOURCE_SIZE: f32 = 34.0;
@@ -18,8 +19,12 @@ pub struct SourcePlugin;
 
 impl Plugin for SourcePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_source_assets)
-            .add_systems(Update, spawn_from_sources);
+        app.add_systems(Startup, setup_source_assets).add_systems(
+            Update,
+            // In pausa i timer non avanzano nemmeno: al play il flusso riprende
+            // da dov'era invece di recuperare tutto il tempo fermo.
+            spawn_from_sources.run_if(in_state(SimulationState::Running)),
+        );
     }
 }
 
