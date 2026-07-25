@@ -4,6 +4,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
+use bevy::ui::UiGlobalTransform;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
@@ -105,8 +106,15 @@ pub struct Recording {
 #[derive(Resource, Default)]
 pub struct Replay {
     trace: Option<Trace>,
-    next_frame: usize,
+    /// L'istante da mostrare. Lo fa avanzare il tempo, oppure lo sposta di
+    /// colpo la barra.
+    frame: usize,
+    /// L'ultimo istante gia' messo in scena. Serve a distinguere "il tempo non
+    /// e' passato" da "sei saltato altrove": in pausa e' l'unico modo per
+    /// accorgersi di un salto e ridisegnare.
+    applied: Option<usize>,
     countdown: f32,
+    paused: bool,
 }
 
 impl Replay {
@@ -120,8 +128,20 @@ impl Replay {
         );
 
         self.trace = Some(trace);
-        self.next_frame = 0;
+        self.frame = 0;
+        self.applied = None;
         self.countdown = 0.0;
+        self.paused = false;
+    }
+
+    /// Ferma e riprende lo scorrere della registrazione, senza ricominciare:
+    /// e' quello che permette di guardare un istante con calma.
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
     }
 }
 
@@ -145,6 +165,14 @@ struct ReplayButton;
 #[derive(Component)]
 struct ReplayLabel;
 
+/// L'elenco delle registrazioni disponibili, aperto dal bottone Riproduci.
+#[derive(Component)]
+struct TraceList;
+
+/// Una voce dell'elenco: porta con se' il file che rappresenta.
+#[derive(Component)]
+struct TraceEntry(String);
+
 pub struct TracePlugin;
 
 impl Plugin for TracePlugin {
@@ -160,6 +188,7 @@ impl Plugin for TracePlugin {
                     record_frames,
                     toggle_replay,
                     play_frames.run_if(in_state(SimulationState::Replaying)),
+                    choose_trace,
                     refresh_buttons,
                     scrub,
                 ),
@@ -223,7 +252,9 @@ fn scrub(
         (
             &Interaction,
             &ComputedNode,
-            &GlobalTransform,
+            // I nodi dell'interfaccia non hanno un `GlobalTransform`: il loro
+            // posto nel mondo lo tiene `UiGlobalTransform`.
+            &UiGlobalTransform,
             &mut Visibility,
         ),
         With<ScrubBar>,
@@ -248,20 +279,28 @@ fn scrub(
         return;
     }
 
-    // Basta che il tasto sia premuto sopra la barra: cosi' si puo' trascinare
-    // avanti e indietro invece di dover cliccare punto per punto.
-    if mouse.pressed(MouseButton::Left) && *interaction != Interaction::None {
-        if let Some(cursor) = windows.single().ok().and_then(|w| w.cursor_position()) {
+    // Solo con il tasto premuto *sulla barra*: passarci sopra per caso non
+    // deve spostare niente, ma tenendo premuto si trascina avanti e indietro.
+    if mouse.pressed(MouseButton::Left) && *interaction == Interaction::Pressed {
+        // Il puntatore va chiesto in pixel fisici: `ComputedNode` e
+        // `UiGlobalTransform` sono in quelli, e su uno schermo ad alta densita'
+        // le due unita' differiscono di un fattore due.
+        let cursor = windows
+            .single()
+            .ok()
+            .and_then(|window| window.physical_cursor_position());
+
+        if let Some(cursor) = cursor {
             let width = node.size().x;
-            let left = transform.translation().x - width / 2.0;
+            let left = transform.translation.x - width / 2.0;
             let fraction = ((cursor.x - left) / width).clamp(0.0, 1.0);
 
-            replay.next_frame = (fraction * total as f32) as usize;
+            replay.frame = (fraction * total as f32) as usize;
         }
     }
 
     for mut fill in fills.iter_mut() {
-        fill.width = Val::Percent(100.0 * replay.next_frame as f32 / total as f32);
+        fill.width = Val::Percent(100.0 * replay.frame as f32 / total as f32);
     }
 }
 
@@ -371,8 +410,7 @@ fn toggle_replay(
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
     mut notice: ResMut<ReplayNotice>,
-    carriers: Query<Entity, With<Carrier>>,
-    placed: Query<(Entity, &Placed)>,
+    lists: Query<Entity, With<TraceList>>,
 ) {
     if !pressed(&buttons) {
         return;
@@ -385,48 +423,112 @@ fn toggle_replay(
         return;
     }
 
-    match newest_trace() {
-        Some(path) => match load(&path) {
-            Ok(trace) => {
-                // Si sgombra tutto: quello che si vedra' arriva dal file,
-                // impianto compreso. Riprodurre una registrazione sopra un
-                // layout diverso mostrerebbe carrier che sfilano fra oggetti
-                // che non c'entrano.
-                for entity in carriers.iter() {
-                    commands.entity(entity).despawn();
-                }
-                for (entity, _) in placed.iter() {
-                    commands.entity(entity).despawn();
-                }
-                spawn_layout(&mut commands, &trace.layout);
-
-                replay.start(trace);
-                next_state.set(SimulationState::Replaying);
-            }
-            Err(error) => {
-                error!("non riesco a leggere {path}: {error}");
-                notice.show("Illeggibile");
-            }
-        },
-        None => {
-            warn!("nessuna registrazione da riprodurre: prima serve un Registra");
-            notice.show("Nessuna");
-        }
+    // Se l'elenco e' gia' aperto, il tasto lo richiude.
+    if let Ok(open) = lists.single() {
+        commands.entity(open).despawn();
+        return;
     }
+
+    let traces = available_traces();
+    if traces.is_empty() {
+        warn!("nessuna registrazione da riprodurre: prima serve un Registra");
+        notice.show("Nessuna");
+        return;
+    }
+
+    open_trace_list(&mut commands, &traces);
 }
 
-/// La registrazione piu' recente nella cartella di lavoro.
-fn newest_trace() -> Option<String> {
+/// L'elenco delle registrazioni nella cartella di lavoro, dalla piu' recente.
+/// Il nome contiene l'istante, quindi l'ordine alfabetico e' quello cronologico.
+fn available_traces() -> Vec<String> {
     let mut traces: Vec<String> = fs::read_dir(".")
-        .ok()?
+        .into_iter()
+        .flatten()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("registrazione-") && name.ends_with(".ron"))
         .collect();
 
-    // Il nome contiene l'istante: l'ordine alfabetico e' l'ordine cronologico.
     traces.sort();
-    traces.pop()
+    traces.reverse();
+    traces
+}
+
+fn open_trace_list(commands: &mut Commands, traces: &[String]) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(44.0),
+                left: Val::Px(PALETTE_WIDTH + 12.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(6.0)),
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
+            TraceList,
+        ))
+        .with_children(|list| {
+            for name in traces {
+                list.spawn((
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_IDLE),
+                    TraceEntry(name.clone()),
+                    children![button_label(name)],
+                ));
+            }
+        });
+}
+
+/// Un clic su una voce dell'elenco fa partire quella registrazione.
+fn choose_trace(
+    mut commands: Commands,
+    entries: Query<(&Interaction, &TraceEntry), Changed<Interaction>>,
+    lists: Query<Entity, With<TraceList>>,
+    mut replay: ResMut<Replay>,
+    mut notice: ResMut<ReplayNotice>,
+    mut next_state: ResMut<NextState<SimulationState>>,
+    carriers: Query<Entity, With<Carrier>>,
+    placed: Query<(Entity, &Placed)>,
+) {
+    let Some((_, entry)) = entries
+        .iter()
+        .find(|(interaction, _)| **interaction == Interaction::Pressed)
+    else {
+        return;
+    };
+
+    match load(&entry.0) {
+        Ok(trace) => {
+            // Si sgombra tutto: quello che si vedra' arriva dal file, impianto
+            // compreso. Riprodurre una registrazione sopra un layout diverso
+            // mostrerebbe carrier che sfilano fra oggetti che non c'entrano.
+            for entity in carriers.iter() {
+                commands.entity(entity).despawn();
+            }
+            for (entity, _) in placed.iter() {
+                commands.entity(entity).despawn();
+            }
+            spawn_layout(&mut commands, &trace.layout);
+
+            replay.start(trace);
+            next_state.set(SimulationState::Replaying);
+        }
+        Err(error) => {
+            error!("non riesco a leggere {}: {error}", entry.0);
+            notice.show("Illeggibile");
+        }
+    }
+
+    for list in lists.iter() {
+        commands.entity(list).despawn();
+    }
 }
 
 /// Rimette in scena un istante della registrazione: sposta i carrier che c'erano
@@ -445,15 +547,24 @@ fn play_frames(
         return;
     };
 
-    replay.countdown -= time.delta_secs();
-    if replay.countdown > 0.0 {
+    // Il tempo scorre solo se non e' in pausa; la barra invece puo' spostare
+    // l'istante in qualunque momento, e anche allora la scena deve seguirlo.
+    if !replay.paused {
+        replay.countdown -= time.delta_secs();
+
+        if replay.countdown <= 0.0 {
+            replay.countdown += 1.0 / fps;
+            replay.frame += 1;
+        }
+    }
+
+    // Rimettere in scena costa: si fa solo quando l'istante e' cambiato
+    // davvero, per scorrimento o per salto.
+    if replay.applied == Some(replay.frame) {
         return;
     }
-    replay.countdown += 1.0 / fps;
 
-    let wanted = replay.next_frame;
-    replay.next_frame += 1;
-
+    let wanted = replay.frame;
     let frame = match replay
         .trace
         .as_ref()
@@ -467,6 +578,7 @@ fn play_frames(
             return;
         }
     };
+    replay.applied = Some(wanted);
 
     let mut live: HashMap<u32, Entity> = carriers
         .iter()

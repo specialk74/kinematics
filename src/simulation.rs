@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::carrier::{Carrier, NextCarrierId};
 use crate::editor::{BUTTON_IDLE, button_label, top_button};
 use crate::source::CarrierSource;
+use crate::trace::Replay;
 
 const RUNNING_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
 const PAUSED_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
@@ -102,15 +103,19 @@ fn toggle_simulation(
     interactions: Query<&Interaction, (Changed<Interaction>, With<PauseButton>)>,
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
+    mut replay: ResMut<Replay>,
 ) {
     for interaction in interactions.iter() {
-        if *interaction == Interaction::Pressed {
-            next_state.set(match state.get() {
-                SimulationState::Running => SimulationState::Paused,
-                // Durante una riproduzione il tasto rimette in moto la
-                // simulazione vera, interrompendola.
-                SimulationState::Paused | SimulationState::Replaying => SimulationState::Running,
-            });
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        match state.get() {
+            // Durante una riproduzione il tasto ferma il nastro dov'e', non la
+            // simulazione: per uscire dalla riproduzione c'e' il suo Stop.
+            SimulationState::Replaying => replay.toggle_pause(),
+            SimulationState::Running => next_state.set(SimulationState::Paused),
+            SimulationState::Paused => next_state.set(SimulationState::Running),
         }
     }
 }
@@ -118,20 +123,25 @@ fn toggle_simulation(
 /// Il bottone mostra l'azione che compie, non lo stato in cui si trova.
 fn refresh_pause_button(
     state: Res<State<SimulationState>>,
+    replay: Res<Replay>,
     mut buttons: Query<&mut BackgroundColor, With<PauseButton>>,
     mut labels: Query<&mut Text, With<PauseLabel>>,
 ) {
-    if !state.is_changed() {
+    if !state.is_changed() && !replay.is_changed() {
         return;
     }
 
-    let running = *state.get() == SimulationState::Running;
+    let (colour, text) = match state.get() {
+        SimulationState::Running => (RUNNING_COLOR, "Pausa"),
+        SimulationState::Paused => (PAUSED_COLOR, "Play"),
+        SimulationState::Replaying if replay.is_paused() => (PAUSED_COLOR, "Riprendi"),
+        SimulationState::Replaying => (RUNNING_COLOR, "Pausa"),
+    };
 
     for mut background in buttons.iter_mut() {
-        background.0 = if running { RUNNING_COLOR } else { PAUSED_COLOR };
+        background.0 = colour;
     }
-
     for mut label in labels.iter_mut() {
-        label.0 = if running { "Pausa" } else { "Play" }.to_string();
+        label.0 = text.to_string();
     }
 }

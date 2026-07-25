@@ -6,6 +6,7 @@ use crate::carrier::Carrier;
 use crate::grid;
 use crate::layout::{self, LayoutFile, Placed, Switches, place_in_cell, spawn_layout};
 use crate::piece::{self, Facing, PieceShapes};
+use crate::simulation::SimulationState;
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -202,13 +203,23 @@ impl Plugin for EditorPlugin {
                     select_tool,
                     highlight_selected_tool,
                     update_ghost,
+                    handle_layout_buttons,
+                    show_save_outcome,
+                ),
+            )
+            // Durante una riproduzione gli oggetti sono inerti: il loro stato
+            // arriva dal file, e un clic verrebbe sovrascritto dall'istante
+            // successivo. Meglio non rispondere affatto che rispondere per
+            // mezzo secondo.
+            .add_systems(
+                Update,
+                (
                     place_selected_tool,
                     toggle_by_click,
                     rotate_piece,
                     drag_piece,
-                    handle_layout_buttons,
-                    show_save_outcome,
-                ),
+                )
+                    .run_if(not(in_state(SimulationState::Replaying))),
             );
     }
 }
@@ -338,14 +349,18 @@ fn update_ghost(
     ghost_material: Res<GhostMaterial>,
     shapes: Res<PieceShapes>,
     ui_interactions: Query<&Interaction>,
+    state: Res<State<SimulationState>>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
-    // In modo "Sposta" non si piazza niente, quindi non c'e' niente da mostrare.
+    // Niente anteprima in modo "Sposta" ne' durante una riproduzione: in
+    // entrambi i casi il clic non piazzerebbe nulla, e mostrare dove finirebbe
+    // sarebbe una promessa falsa.
+    let replaying = *state.get() == SimulationState::Replaying;
     let target = match (
         selected.0,
         cursor_cell(&windows, &camera_query, &ui_interactions),
     ) {
-        (EditorTool::Place(tool), Some(cell)) => Some((tool, cell)),
+        (EditorTool::Place(tool), Some(cell)) if !replaying => Some((tool, cell)),
         _ => None,
     };
 
