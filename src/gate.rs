@@ -1,9 +1,7 @@
 use bevy::prelude::*;
 
 use crate::geometry::circle_touches_box;
-
-pub const GATE_WIDTH: f32 = 8.0;
-pub const GATE_HEIGHT: f32 = 44.0;
+use crate::piece::{self, Arrow, PIECE_SIZE, PieceShapes};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
 /// quando e' spenta li lascia passare. Se e' fuori dal flusso non blocca nessuno,
@@ -26,18 +24,12 @@ impl Plugin for GateVisualsPlugin {
 
 #[derive(Resource)]
 pub struct GateAssets {
-    mesh: Handle<Mesh>,
     active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
-fn setup_gate_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_gate_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(GateAssets {
-        mesh: meshes.add(Rectangle::new(GATE_WIDTH, GATE_HEIGHT)),
         active_material: materials.add(Color::srgb(0.9, 0.1, 0.1)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
@@ -47,17 +39,7 @@ fn setup_gate_assets(
 /// Il raggio arriva da fuori: cosi' il gate non ha bisogno di sapere nulla
 /// di com'e' fatto un carrier.
 pub fn blocks_circle(gate: Vec3, point: Vec3, radius: f32) -> bool {
-    circle_touches_box(
-        gate,
-        Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0,
-        point,
-        radius,
-    )
-}
-
-/// Mesh e orientamento del gate, condivisi con l'anteprima dell'editor.
-pub fn shape(assets: &GateAssets) -> (Handle<Mesh>, Quat) {
-    (assets.mesh.clone(), Quat::IDENTITY)
+    circle_touches_box(gate, Vec2::splat(PIECE_SIZE / 2.0), point, radius)
 }
 
 /// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
@@ -78,16 +60,18 @@ fn material_for(assets: &GateAssets, active: bool) -> Handle<ColorMaterial> {
 
 fn attach_gate_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<GateAssets>,
     gates: Query<(Entity, &Gate), Without<Mesh2d>>,
 ) {
-    let (mesh, _) = shape(&assets);
-
     for (entity, gate) in gates.iter() {
-        commands.entity(entity).insert((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(material_for(&assets, gate.active)),
-        ));
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            material_for(&assets, gate.active),
+            Arrow::None,
+        );
     }
 }
 

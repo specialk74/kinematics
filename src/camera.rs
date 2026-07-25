@@ -1,7 +1,7 @@
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{EditorTool, SelectedTool, pointer_over_ui};
+use crate::editor::{DraggedPiece, EditorTool, SelectedTool, pointer_over_ui};
 
 /// Vista di partenza, quella a cui riporta il pulsante di reset.
 const DEFAULT_ZOOM: f32 = 1.0;
@@ -97,11 +97,12 @@ fn pan_view(
     mouse: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
     selected: Res<SelectedTool>,
+    dragged: Res<DraggedPiece>,
     ui_interactions: Query<&Interaction>,
     mut panning: ResMut<Panning>,
     mut camera: Query<(&Projection, &mut Transform), With<Camera2d>>,
 ) {
-    let dragged: Vec2 = motion.read().map(|motion| motion.delta).sum();
+    let moved: Vec2 = motion.read().map(|motion| motion.delta).sum();
 
     if mouse.just_pressed(MouseButton::Left) {
         panning.0 = selected.0 == EditorTool::Pan && !pointer_over_ui(&ui_interactions);
@@ -110,7 +111,8 @@ fn pan_view(
         panning.0 = false;
     }
 
-    if !panning.0 || dragged == Vec2::ZERO {
+    // Se si sta trascinando un oggetto, e' lui a muoversi e non la vista.
+    if !panning.0 || dragged.0.is_some() || moved == Vec2::ZERO {
         return;
     }
 
@@ -122,7 +124,7 @@ fn pan_view(
     };
 
     // La y dello schermo cresce verso il basso, quella del mondo verso l'alto.
-    let world = Vec2::new(-dragged.x, dragged.y) * orthographic.scale;
+    let world = Vec2::new(-moved.x, moved.y) * orthographic.scale;
     transform.translation += world.extend(0.0);
 }
 

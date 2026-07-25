@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::divert::DivertKind;
 use crate::editor::Tool;
+use crate::piece::Facing;
 
 /// File usato quando non se ne passa uno sulla riga di comando. Il percorso e'
 /// relativo alla cartella da cui si lancia il programma, non a dove sta l'eseguibile.
@@ -56,6 +57,10 @@ impl LayoutFile {
 pub struct LayoutObject {
     pub tool: Tool,
     pub cell: (i32, i32),
+    /// Dove manda il carrier. Assente nei file salvati prima che gli oggetti
+    /// avessero un orientamento: quelli si riaprono con il verso di partenza.
+    #[serde(default)]
+    pub facing: Facing,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
@@ -85,7 +90,7 @@ impl Plugin for LayoutPlugin {
 
 /// Unico punto in cui nasce un oggetto della scena: lo usano il clic
 /// dell'editor, il bottone Carica e l'avvio da riga di comando.
-pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2) {
+pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: Facing) {
     let position = crate::grid::cell_center(cell).extend(1.0);
     let object = match tool {
         Tool::CarrierSource => crate::source::spawn_source(commands, position),
@@ -97,7 +102,9 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2) {
         Tool::Reverser => crate::reverser::spawn_reverser(commands, position),
     };
 
-    commands.entity(object).insert(Placed { tool, cell });
+    commands
+        .entity(object)
+        .insert((Placed { tool, cell }, facing));
 }
 
 pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
@@ -106,6 +113,7 @@ pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
             commands,
             object.tool,
             IVec2::new(object.cell.0, object.cell.1),
+            object.facing,
         );
     }
 
@@ -155,18 +163,22 @@ mod tests {
                 LayoutObject {
                     tool: Tool::CarrierSource,
                     cell: (6, 0),
+                    facing: Facing::default(),
                 },
                 LayoutObject {
                     tool: Tool::Divert,
                     cell: (2, 0),
+                    facing: Facing(crate::carrier::Heading::Up),
                 },
                 LayoutObject {
                     tool: Tool::Atr,
                     cell: (-1, 1),
+                    facing: Facing::default(),
                 },
                 LayoutObject {
                     tool: Tool::Gate,
                     cell: (-3, 0),
+                    facing: Facing::default(),
                 },
             ],
         }
@@ -187,6 +199,16 @@ mod tests {
 
         assert!(saved.contains("CarrierSource"), "{saved}");
         assert!(saved.contains("(6, 0)"), "{saved}");
+    }
+
+    /// I file salvati prima dell'orientamento devono continuare ad aprirsi.
+    #[test]
+    fn an_old_file_without_facing_still_loads() {
+        let old = "(objects: [(tool: Gate, cell: (1, 2))])";
+
+        let layout = from_ron(old).expect("rilettura");
+
+        assert_eq!(layout.objects[0].facing, Facing::default());
     }
 
     #[test]

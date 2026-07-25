@@ -2,9 +2,8 @@ use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_RADIUS, Carrier};
 use crate::geometry::circle_touches_box;
+use crate::piece::{self, Arrow, PIECE_SIZE, PieceShapes};
 use crate::simulation::SimulationState;
-
-pub const DESPAWNER_SIZE: f32 = 30.0;
 
 /// Uscita dal sistema: il carrier che la tocca smette di esistere. Senza
 /// nessuna uscita piazzata i carrier proseguono verso sinistra all'infinito.
@@ -34,24 +33,13 @@ impl Plugin for DespawnerVisualsPlugin {
 
 #[derive(Resource)]
 pub struct DespawnerAssets {
-    mesh: Handle<Mesh>,
     material: Handle<ColorMaterial>,
 }
 
-fn setup_despawner_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_despawner_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(DespawnerAssets {
-        mesh: meshes.add(Rectangle::new(DESPAWNER_SIZE, DESPAWNER_SIZE)),
         material: materials.add(Color::srgb(0.55, 0.10, 0.10)),
     });
-}
-
-/// Mesh e orientamento dell'uscita, condivisi con l'anteprima dell'editor.
-pub fn shape(assets: &DespawnerAssets) -> (Handle<Mesh>, Quat) {
-    (assets.mesh.clone(), Quat::IDENTITY)
 }
 
 pub fn spawn_despawner(commands: &mut Commands, position: Vec3) -> Entity {
@@ -62,16 +50,18 @@ pub fn spawn_despawner(commands: &mut Commands, position: Vec3) -> Entity {
 
 fn attach_despawner_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<DespawnerAssets>,
     despawners: Query<Entity, (With<Despawner>, Without<Mesh2d>)>,
 ) {
-    let (mesh, _) = shape(&assets);
-
     for entity in despawners.iter() {
-        commands.entity(entity).insert((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(assets.material.clone()),
-        ));
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            assets.material.clone(),
+            Arrow::Stop,
+        );
     }
 }
 
@@ -79,7 +69,7 @@ fn attach_despawner_visuals(
 fn swallows(despawner: Vec3, carrier: Vec3) -> bool {
     circle_touches_box(
         despawner,
-        Vec2::splat(DESPAWNER_SIZE / 2.0),
+        Vec2::splat(PIECE_SIZE / 2.0),
         carrier,
         CARRIER_RADIUS,
     )

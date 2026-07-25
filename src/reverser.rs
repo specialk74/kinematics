@@ -4,8 +4,8 @@ use bevy::prelude::*;
 
 use crate::carrier::{Heading, Motion};
 use crate::grid::GRID_STEP;
+use crate::piece::{self, Arrow, PieceShapes};
 
-pub const REVERSER_SIZE: f32 = 30.0;
 /// Raggio della curva: mezza cella, cosi' la semicirconferenza porta il carrier
 /// esattamente una cella piu' in basso.
 pub const TURN_RADIUS: f32 = GRID_STEP / 2.0;
@@ -49,27 +49,16 @@ impl Plugin for ReverserVisualsPlugin {
 
 #[derive(Resource)]
 pub struct ReverserAssets {
-    mesh: Handle<Mesh>,
     active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
-fn setup_reverser_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_reverser_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(ReverserAssets {
         // Rombo: distinto da triangoli, quadrati, sbarre e cerchi.
-        mesh: meshes.add(Rhombus::new(REVERSER_SIZE, REVERSER_SIZE)),
         active_material: materials.add(Color::srgb(0.65, 0.30, 0.95)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
-}
-
-/// Mesh e orientamento, condivisi con l'anteprima dell'editor.
-pub fn shape(assets: &ReverserAssets) -> (Handle<Mesh>, Quat) {
-    (assets.mesh.clone(), Quat::IDENTITY)
 }
 
 pub fn spawn_reverser(commands: &mut Commands, position: Vec3) -> Entity {
@@ -91,16 +80,18 @@ fn material_for(assets: &ReverserAssets, reverser: &Reverser) -> Handle<ColorMat
 
 fn attach_reverser_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<ReverserAssets>,
     reversers: Query<(Entity, &Reverser), Without<Mesh2d>>,
 ) {
-    let (mesh, _) = shape(&assets);
-
     for (entity, reverser) in reversers.iter() {
-        commands.entity(entity).insert((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(material_for(&assets, reverser)),
-        ));
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            material_for(&assets, reverser),
+            Arrow::Curved,
+        );
     }
 }
 

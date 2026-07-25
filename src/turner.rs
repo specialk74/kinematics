@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-pub const TURNER_SIZE: f32 = 30.0;
+use crate::piece::{self, Arrow, PieceShapes};
 
 /// Fa svoltare il carrier a destra rispetto alla sua marcia: chi va a sinistra
 /// prosegue verso l'alto, chi sale prosegue verso destra, e cosi' via. Definirla
@@ -25,27 +25,16 @@ impl Plugin for TurnerVisualsPlugin {
 
 #[derive(Resource)]
 pub struct TurnerAssets {
-    mesh: Handle<Mesh>,
     active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
-fn setup_turner_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_turner_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(TurnerAssets {
         // Esagono: nessun altro oggetto ha questa forma.
-        mesh: meshes.add(RegularPolygon::new(TURNER_SIZE / 2.0, 6)),
         active_material: materials.add(Color::srgb(0.10, 0.70, 0.70)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
-}
-
-/// Mesh e orientamento, condivisi con l'anteprima dell'editor.
-pub fn shape(assets: &TurnerAssets) -> (Handle<Mesh>, Quat) {
-    (assets.mesh.clone(), Quat::IDENTITY)
 }
 
 pub fn spawn_turner(commands: &mut Commands, position: Vec3) -> Entity {
@@ -67,16 +56,18 @@ fn material_for(assets: &TurnerAssets, active: bool) -> Handle<ColorMaterial> {
 
 fn attach_turner_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<TurnerAssets>,
     turners: Query<(Entity, &Turner), Without<Mesh2d>>,
 ) {
-    let (mesh, _) = shape(&assets);
-
     for (entity, turner) in turners.iter() {
-        commands.entity(entity).insert((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(material_for(&assets, turner.active)),
-        ));
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            material_for(&assets, turner.active),
+            Arrow::Straight,
+        );
     }
 }
 

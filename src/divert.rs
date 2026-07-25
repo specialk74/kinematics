@@ -1,10 +1,8 @@
-use std::f32::consts::PI;
-
 use bevy::prelude::*;
 
 use crate::carrier::Heading;
+use crate::piece::{self, Arrow, PieceShapes};
 
-pub const DIVERT_SIZE: f32 = 30.0;
 /// Dislivello fra la corsia principale e quella deviata.
 pub const LANE_HEIGHT: f32 = 64.0;
 /// Semilarghezza della finestra orizzontale in cui il deviatore aggancia i carrier.
@@ -31,29 +29,29 @@ pub struct Divert {
 }
 
 impl Divert {
-    /// Di quanto il deviatore sposta il carrier **di lato rispetto alla sua
-    /// marcia**: una cella verso la sua destra per il divert, una verso la sua
-    /// sinistra per l'ATR. Riferirlo al carrier e non agli assi e' quello che lo
-    /// fa funzionare anche su un flusso verticale: chi sale viene spostato di una
-    /// colonna a destra, esattamente come chi va a sinistra viene alzato di una riga.
-    pub fn lateral_target(&self) -> f32 {
-        match self.kind {
-            DivertKind::Divert => LANE_HEIGHT,
-            DivertKind::Atr => -LANE_HEIGHT,
-        }
-    }
-
-    /// Quanto il carrier e' spostato di lato rispetto alla linea del deviatore.
-    pub fn lateral_offset(position: Vec3, carrier: Vec3, heading: Heading) -> f32 {
-        (carrier.truncate() - position.truncate()).dot(heading.turn_right().as_vec())
-    }
-
-    /// Vero se il deviatore, piazzato in `position`, aggancia un carrier che
-    /// marcia in `heading`. La fascia copre il corridoio fra la linea del
-    /// deviatore e quella di destinazione: ci sta dentro tutta la manovra, e i
-    /// carrier che viaggiano altrove non vengono toccati.
-    pub fn catches(&self, position: Vec3, carrier: Vec3, heading: Heading) -> bool {
+    /// Vero se il deviatore, piazzato in `position` e girato verso `facing`,
+    /// aggancia un carrier che marcia in `heading`. La fascia copre il
+    /// corridoio fra la linea del deviatore e quella di destinazione: ci sta
+    /// dentro tutta la manovra, e i carrier che viaggiano altrove non vengono
+    /// toccati.
+    pub fn catches(
+        &self,
+        position: Vec3,
+        carrier: Vec3,
+        facing: Heading,
+        heading: Heading,
+    ) -> bool {
         if !self.active {
+            return false;
+        }
+
+        // Un deviatore sposta *di lato*: se la sua freccia e' parallela alla
+        // marcia del carrier non c'e' nessun lato verso cui spostarlo, e non
+        // deve fare niente. Senza questo controllo i due vincoli qui sotto
+        // cadrebbero entrambi sullo stesso asse, lasciando l'altro libero: il
+        // deviatore aggancerebbe carrier a qualunque distanza sulla
+        // perpendicolare, anche a mezzo impianto di distanza.
+        if facing.as_vec().dot(heading.as_vec()) != 0.0 {
             return false;
         }
 
@@ -62,11 +60,9 @@ impl Divert {
             return false;
         }
 
-        let target = self.lateral_target();
-        let corridor =
-            target.min(0.0) - DIVERT_LANE_TOLERANCE..=target.max(0.0) + DIVERT_LANE_TOLERANCE;
+        let corridor = -DIVERT_LANE_TOLERANCE..=LANE_HEIGHT + DIVERT_LANE_TOLERANCE;
 
-        corridor.contains(&Divert::lateral_offset(position, carrier, heading))
+        corridor.contains(&delta.dot(facing.as_vec()))
     }
 }
 
@@ -83,32 +79,19 @@ impl Plugin for DivertVisualsPlugin {
 
 #[derive(Resource)]
 pub struct DivertAssets {
-    mesh: Handle<Mesh>,
-    active_material: Handle<ColorMaterial>,
+    divert_material: Handle<ColorMaterial>,
+    atr_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
-fn setup_divert_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_divert_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(DivertAssets {
-        mesh: meshes.add(RegularPolygon::new(DIVERT_SIZE / 2.0, 3)),
-        active_material: materials.add(Color::srgb(1.0, 0.6, 0.1)),
+        divert_material: materials.add(Color::srgb(1.0, 0.6, 0.1)),
+        // Con l'orientamento i due si comportano allo stesso modo: il colore e'
+        // quello che resta a distinguerli a colpo d'occhio.
+        atr_material: materials.add(Color::srgb(0.85, 0.40, 0.05)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
-}
-
-/// Mesh e orientamento del deviatore: il triangolo punta nel verso della
-/// deviazione. La usa anche l'anteprima dell'editor.
-pub fn shape(assets: &DivertAssets, kind: DivertKind) -> (Handle<Mesh>, Quat) {
-    let rotation = match kind {
-        DivertKind::Divert => Quat::IDENTITY,
-        DivertKind::Atr => Quat::from_rotation_z(PI),
-    };
-
-    (assets.mesh.clone(), rotation)
 }
 
 /// Piazza un deviatore gia' attivo.
@@ -121,27 +104,28 @@ pub fn spawn_divert(commands: &mut Commands, position: Vec3, kind: DivertKind) -
         .id()
 }
 
-fn material_for(assets: &DivertAssets, active: bool) -> Handle<ColorMaterial> {
-    if active {
-        assets.active_material.clone()
-    } else {
-        assets.idle_material.clone()
+fn material_for(assets: &DivertAssets, divert: &Divert) -> Handle<ColorMaterial> {
+    match (divert.active, divert.kind) {
+        (false, _) => assets.idle_material.clone(),
+        (true, DivertKind::Divert) => assets.divert_material.clone(),
+        (true, DivertKind::Atr) => assets.atr_material.clone(),
     }
 }
 
 fn attach_divert_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<DivertAssets>,
-    diverts: Query<(Entity, &Divert, &mut Transform), Without<Mesh2d>>,
+    diverts: Query<(Entity, &Divert), Without<Mesh2d>>,
 ) {
-    for (entity, divert, mut transform) in diverts {
-        let (mesh, rotation) = shape(&assets, divert.kind);
-        transform.rotation = rotation;
-
-        commands.entity(entity).insert((
-            Mesh2d(mesh),
-            MeshMaterial2d(material_for(&assets, divert.active)),
-        ));
+    for (entity, divert) in diverts.iter() {
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            material_for(&assets, divert),
+            Arrow::Straight,
+        );
     }
 }
 
@@ -150,7 +134,7 @@ fn refresh_divert_colour(
     diverts: Query<(&Divert, &mut MeshMaterial2d<ColorMaterial>), Changed<Divert>>,
 ) {
     for (divert, mut material) in diverts {
-        material.0 = material_for(&assets, divert.active);
+        material.0 = material_for(&assets, divert);
     }
 }
 
@@ -158,92 +142,91 @@ fn refresh_divert_colour(
 mod tests {
     use super::*;
 
-    fn divert(kind: DivertKind) -> Divert {
-        Divert { kind, active: true }
-    }
-
-    /// Spostamenti opposti e della stessa ampiezza: e' quello che permette a un
-    /// divert e a un ATR di annullarsi a vicenda.
-    #[test]
-    fn the_two_kinds_shift_by_one_cell_in_opposite_directions() {
-        assert_eq!(divert(DivertKind::Divert).lateral_target(), LANE_HEIGHT);
-        assert_eq!(divert(DivertKind::Atr).lateral_target(), -LANE_HEIGHT);
-    }
-
-    /// Il caso che mancava: su un flusso verticale lo spostamento resta "a
-    /// destra del carrier", quindi diventa orizzontale.
-    #[test]
-    fn a_rising_carrier_is_shifted_sideways() {
-        let up = divert(DivertKind::Divert);
-        let position = Vec3::ZERO;
-
-        // Il carrier sale lungo la colonna del deviatore: sta sulla sua linea.
-        assert_eq!(
-            Divert::lateral_offset(position, Vec3::ZERO, Heading::Up),
-            0.0
-        );
-        assert!(up.catches(position, Vec3::ZERO, Heading::Up));
-
-        // Una colonna a destra e' la destinazione: li' la manovra e' finita.
-        let arrived = Vec3::new(LANE_HEIGHT, 0.0, 0.0);
-        assert_eq!(
-            Divert::lateral_offset(position, arrived, Heading::Up),
-            LANE_HEIGHT
-        );
-        assert!(up.catches(position, arrived, Heading::Up));
-
-        // Una colonna a sinistra e' fuori dal corridoio.
-        assert!(!up.catches(position, Vec3::new(-LANE_HEIGHT, 0.0, 0.0), Heading::Up));
+    fn divert() -> Divert {
+        Divert {
+            kind: DivertKind::Divert,
+            active: true,
+        }
     }
 
     /// La fascia di aggancio copre il corridoio della manovra e niente altro:
-    /// sopra il divert, sotto l'ATR.
-    /// Su un flusso verso sinistra la destra del carrier e' l'alto: il divert
-    /// guarda sopra di se', l'ATR sotto.
+    /// dalla linea del deviatore a quella indicata dalla freccia.
     #[test]
     fn the_catch_band_covers_the_manoeuvre_only() {
-        let up = divert(DivertKind::Divert);
-        let down = divert(DivertKind::Atr);
+        let divert = divert();
         let position = Vec3::ZERO;
-        let left = Heading::Left;
+        let flow = Heading::Left;
+        let arrow = Heading::Up;
 
         assert!(
-            up.catches(position, Vec3::ZERO, left),
+            divert.catches(position, Vec3::ZERO, arrow, flow),
             "linea del deviatore"
         );
         assert!(
-            up.catches(position, Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0), left),
-            "a meta' della salita"
+            divert.catches(
+                position,
+                Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0),
+                arrow,
+                flow
+            ),
+            "a meta' dello spostamento"
         );
         assert!(
-            !up.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0), left),
-            "il divert non guarda sotto di se'"
-        );
-
-        assert!(
-            down.catches(position, Vec3::ZERO, left),
-            "linea del deviatore"
+            !divert.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0), arrow, flow),
+            "dalla parte opposta alla freccia"
         );
         assert!(
-            down.catches(position, Vec3::new(-10.0, -LANE_HEIGHT / 2.0, 0.0), left),
-            "a meta' della discesa"
-        );
-        assert!(
-            !down.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0), left),
-            "l'ATR non guarda sopra di se'"
-        );
-
-        assert!(
-            !up.catches(position, Vec3::new(60.0, 0.0, 0.0), left),
+            !divert.catches(position, Vec3::new(60.0, 0.0, 0.0), arrow, flow),
             "fuori dalla finestra di aggancio"
+        );
+    }
+
+    /// La freccia decide da sola: lo stesso deviatore, girato, prende il
+    /// corridoio opposto senza sapere nulla della marcia del carrier.
+    #[test]
+    fn turning_the_arrow_turns_the_corridor() {
+        let divert = divert();
+        let position = Vec3::ZERO;
+        let flow = Heading::Left;
+        let below = Vec3::new(0.0, -LANE_HEIGHT / 2.0, 0.0);
+
+        assert!(!divert.catches(position, below, Heading::Up, flow));
+        assert!(divert.catches(position, below, Heading::Down, flow));
+    }
+
+    /// Il caso che bloccava un impianto vero: un deviatore girato nel verso del
+    /// flusso, quattro celle piu' in alto, agganciava lo stesso i carrier e li
+    /// spingeva indietro. Deve ignorarli, per quanto vicini siano sull'altro asse.
+    #[test]
+    fn an_arrow_parallel_to_the_flow_touches_nobody() {
+        let divert = divert();
+        let far_above = Vec3::new(192.0, 256.0, 0.0);
+        let carrier = Vec3::new(215.0, 0.0, 0.0);
+
+        assert!(
+            !divert.catches(far_above, carrier, Heading::Right, Heading::Left),
+            "freccia opposta alla marcia"
+        );
+        assert!(
+            !divert.catches(far_above, carrier, Heading::Left, Heading::Left),
+            "freccia nel verso della marcia"
+        );
+        assert!(
+            !divert.catches(
+                Vec3::ZERO,
+                Vec3::new(10.0, 0.0, 0.0),
+                Heading::Left,
+                Heading::Left
+            ),
+            "nemmeno quando e' vicino: non c'e' un lato verso cui spostarlo"
         );
     }
 
     #[test]
     fn inactive_divert_lets_everything_through() {
-        let mut up = divert(DivertKind::Divert);
-        up.active = false;
+        let mut off = divert();
+        off.active = false;
 
-        assert!(!up.catches(Vec3::ZERO, Vec3::ZERO, Heading::Left));
+        assert!(!off.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
     }
 }

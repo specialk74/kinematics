@@ -1,9 +1,11 @@
 use bevy::prelude::*;
 use bevy::text::TextBounds;
 use rand::prelude::*;
+use serde::{Deserialize, Serialize};
 
-use crate::divert::Divert;
+use crate::divert::{Divert, LANE_HEIGHT};
 use crate::gate::{Gate, blocks_circle};
+use crate::piece::Facing;
 use crate::reverser::{Reverser, TURN_RADIUS};
 use crate::simulation::SimulationState;
 use crate::turner::Turner;
@@ -46,7 +48,7 @@ impl SampleId {
 }
 
 /// Verso di marcia lungo gli assi della griglia.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Heading {
     Left,
     Right,
@@ -73,6 +75,14 @@ impl Heading {
             Heading::Right => Heading::Down,
             Heading::Down => Heading::Left,
         }
+    }
+
+    /// Rotazione che porta una figura disegnata verso l'alto a puntare in
+    /// questo verso: e' cosi' che la freccia dentro i quadrati segue l'oggetto.
+    pub fn rotation(self) -> Quat {
+        let along = self.as_vec();
+
+        Quat::from_rotation_z(along.y.atan2(along.x) - std::f32::consts::FRAC_PI_2)
     }
 
     pub fn opposite(self) -> Self {
@@ -269,7 +279,12 @@ fn carrier_label(carrier: &Carrier) -> impl Bundle {
 
 /// Immette un carrier nel flusso; il tipo (vuoto o con tubo) e' casuale 50-50.
 /// Il campione lo ha solo chi porta un tubo: e' il tubo il campione.
-pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut NextCarrierId) {
+pub fn spawn_random_carrier(
+    commands: &mut Commands,
+    position: Vec3,
+    heading: Heading,
+    ids: &mut NextCarrierId,
+) {
     let mut rng = rand::rng();
     let carrier_id = ids.take();
 
@@ -280,7 +295,7 @@ pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut N
                 kind: CarrierType::WithTube,
                 carrier_id,
                 sample_id: placeholder_sample_id(carrier_id),
-                motion: Motion::Straight(Heading::Left),
+                motion: Motion::Straight(heading),
             },
             children![Tube],
         ));
@@ -291,7 +306,7 @@ pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut N
                 kind: CarrierType::Empty,
                 carrier_id,
                 sample_id: None,
-                motion: Motion::Straight(Heading::Left),
+                motion: Motion::Straight(heading),
             },
         ));
     }
@@ -305,8 +320,8 @@ fn placeholder_sample_id(carrier_id: u32) -> Option<SampleId> {
 
 /// Quello che il mondo puo' dire a un carrier in movimento.
 pub struct Track<'a> {
-    pub diverts: &'a [(&'a Divert, Vec3)],
-    pub turners: &'a [(&'a Turner, Vec3)],
+    pub diverts: &'a [(&'a Divert, Heading, Vec3)],
+    pub turners: &'a [(&'a Turner, Heading, Vec3)],
     pub reversers: &'a [(&'a Reverser, Vec3)],
 }
 
@@ -360,13 +375,14 @@ fn carrier_step(
         }
     }
 
-    // 3. La svolta vale per tutti i carrier, tubo o non tubo.
-    for (turner, position) in track.turners {
+    // 3. La svolta vale per tutti i carrier, tubo o non tubo: la nuova marcia e'
+    //    quella indicata dalla freccia dell'oggetto.
+    for (turner, facing, position) in track.turners {
         if turner.active && crosses(*position, translation, straight, heading) {
             // Si riparte dal centro esatto dell'oggetto, altrimenti la nuova
             // marcia partirebbe sfalsata rispetto alla griglia.
             let snap = (position.truncate() - translation.truncate()).extend(0.0);
-            return (snap, Motion::Straight(heading.turn_right()));
+            return (snap, Motion::Straight(*facing));
         }
     }
 
@@ -375,21 +391,20 @@ fn carrier_step(
         return (straight, carrier.motion);
     }
 
-    for (divert, position) in track.diverts {
-        if !divert.catches(*position, translation, heading) {
+    for (divert, facing, position) in track.diverts {
+        if !divert.catches(*position, translation, *facing, heading) {
             continue;
         }
 
-        // Lo spostamento e' di lato rispetto alla marcia, non lungo un asse
-        // fisso: e' cosi' che un divert su un flusso verticale sposta di una
-        // colonna invece che di una riga.
-        let sideways = heading.turn_right().as_vec();
-        let offset = Divert::lateral_offset(*position, translation, heading);
+        // Lo spostamento segue la freccia dell'oggetto: e' la rotazione a dire
+        // dove finisce il carrier, non la sua marcia.
+        let sideways = facing.as_vec();
+        let offset = (translation.truncate() - position.truncate()).dot(sideways);
         // Il passo di lato non supera mai la destinazione: e' questo che fa
         // arrivare il carrier esattamente sulla linea voluta, invece di
         // lasciarlo dove capita quando esce dalla finestra del deviatore.
         let reach = BELT_SPEED * delta_secs;
-        let shift = (divert.lateral_target() - offset).clamp(-reach, reach);
+        let shift = (LANE_HEIGHT - offset).clamp(-reach, reach);
         // Gia' a destinazione: questo deviatore non ha niente da fare, ma un
         // altro sulla stessa linea potrebbe averne.
         if shift == 0.0 {
@@ -403,12 +418,68 @@ fn carrier_step(
     (straight, carrier.motion)
 }
 
+/// Quello che serve sapere di un carrier per far avanzare un frame.
+pub struct Moving<'a> {
+    pub carrier: &'a Carrier,
+    pub position: Vec3,
+}
+
+/// Fa avanzare tutti i carrier di un frame. Per ciascuno restituisce dove
+/// finisce e come si muovera'; `None` se e' stato fermato, perche' chi non
+/// avanza non cambia nemmeno stato di moto.
+pub fn resolve_frame(
+    belt: &[Moving],
+    track: &Track,
+    active_gates: &[Vec3],
+    delta_secs: f32,
+) -> Vec<(Vec3, Option<Motion>)> {
+    let steps: Vec<(Vec3, Motion)> = belt
+        .iter()
+        .map(|moving| carrier_step(moving.carrier, moving.position, track, delta_secs))
+        .collect();
+
+    belt.iter()
+        .enumerate()
+        .map(|(index, moving)| {
+            let (step, motion) = steps[index];
+            let candidate = moving.position + step;
+
+            // Il confronto e' con le posizioni attuali di tutti gli altri, non
+            // con quelle gia' risolte: da quando i carrier viaggiano anche in
+            // verticale e verso destra non esiste un ordine "chi e' davanti",
+            // e farlo dipendere da uno sbagliato li faceva incastrare.
+            let queued = belt.iter().enumerate().any(|(other, ahead)| {
+                if other == index {
+                    return false;
+                }
+
+                let gap = candidate.distance(ahead.position);
+                gap < CARRIER_SIZE && gap < moving.position.distance(ahead.position)
+            });
+
+            // Un gate attivo ferma il carrier subito prima di toccarlo. Chi lo
+            // stava gia' attraversando quando il gate e' stato attivato finisce
+            // il transito invece di restare incastrato dentro la sbarra.
+            let stopped = active_gates.iter().any(|gate| {
+                blocks_circle(*gate, candidate, CARRIER_RADIUS)
+                    && !blocks_circle(*gate, moving.position, CARRIER_RADIUS)
+            });
+
+            if queued || stopped {
+                (moving.position, None)
+            } else {
+                (candidate, Some(motion))
+            }
+        })
+        .collect()
+}
+
 fn move_carrier(
     time: Res<Time>,
     mut query: Query<(Entity, &mut Carrier, &mut Transform)>,
     gates: Query<(&Gate, &Transform), Without<Carrier>>,
-    diverts: Query<(&Divert, &Transform), Without<Carrier>>,
-    turners: Query<(&Turner, &Transform), Without<Carrier>>,
+    diverts: Query<(&Divert, &Facing, &Transform), Without<Carrier>>,
+    turners: Query<(&Turner, &Facing, &Transform), Without<Carrier>>,
     reversers: Query<(&Reverser, &Transform), Without<Carrier>>,
 ) {
     let delta_secs = time.delta_secs();
@@ -419,13 +490,13 @@ fn move_carrier(
         .map(|(_, transform)| transform.translation)
         .collect();
 
-    let diverts: Vec<(&Divert, Vec3)> = diverts
+    let diverts: Vec<(&Divert, Heading, Vec3)> = diverts
         .iter()
-        .map(|(divert, transform)| (divert, transform.translation))
+        .map(|(divert, facing, transform)| (divert, facing.0, transform.translation))
         .collect();
-    let turners: Vec<(&Turner, Vec3)> = turners
+    let turners: Vec<(&Turner, Heading, Vec3)> = turners
         .iter()
-        .map(|(turner, transform)| (turner, transform.translation))
+        .map(|(turner, facing, transform)| (turner, facing.0, transform.translation))
         .collect();
     let reversers: Vec<(&Reverser, Vec3)> = reversers
         .iter()
@@ -437,45 +508,24 @@ fn move_carrier(
         reversers: &reversers,
     };
 
-    // Si risolve un carrier alla volta partendo da quello piu' avanti sul nastro:
-    // chi si ferma deve bloccare a cascata tutti quelli che ha dietro.
-    let mut belt: Vec<(Entity, Vec3, Vec3, Motion)> = query
+    let entities: Vec<Entity> = query.iter().map(|(entity, _, _)| entity).collect();
+    let positions: Vec<Vec3> = query
         .iter()
-        .map(|(entity, carrier, transform)| {
-            let translation = transform.translation;
-            let (step, motion) = carrier_step(carrier, translation, &track, delta_secs);
-
-            (entity, translation, step, motion)
+        .map(|(_, _, transform)| transform.translation)
+        .collect();
+    let belt: Vec<Moving> = query
+        .iter()
+        .zip(&positions)
+        .map(|((_, carrier, _), position)| Moving {
+            carrier,
+            position: *position,
         })
         .collect();
-    belt.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
 
-    let mut resolved: Vec<(Entity, Vec3, Option<Motion>)> = Vec::with_capacity(belt.len());
-    for (entity, translation, step, motion) in belt {
-        let candidate = translation + step;
-        // Il passo viene annullato solo se avvicina il carrier a uno gia' troppo
-        // vicino: cosi' chi e' sovrapposto puo' comunque allontanarsi.
-        let blocked = resolved.iter().any(|(_, ahead, _)| {
-            let gap = candidate.distance(*ahead);
-            gap < CARRIER_SIZE && gap < translation.distance(*ahead)
-        })
-        // Un gate attivo ferma il carrier subito prima di toccarlo. Chi lo stava
-        // gia' attraversando quando il gate e' stato attivato finisce il transito
-        // invece di restare incastrato dentro la sbarra.
-            || active_gates.iter().any(|gate| {
-                blocks_circle(*gate, candidate, CARRIER_RADIUS)
-                    && !blocks_circle(*gate, translation, CARRIER_RADIUS)
-            });
-        // Il carrier fermato non avanza e non cambia stato di moto: la curva
-        // appena cominciata ripartira' dal punto giusto quando la via si libera.
-        resolved.push(if blocked {
-            (entity, translation, None)
-        } else {
-            (entity, candidate, Some(motion))
-        });
-    }
+    let resolved = resolve_frame(&belt, &track, &active_gates, delta_secs);
+    drop(belt);
 
-    for (entity, translation, motion) in resolved {
+    for (entity, (translation, motion)) in entities.into_iter().zip(resolved) {
         if let Ok((_, mut carrier, mut transform)) = query.get_mut(entity) {
             transform.translation = translation;
 
@@ -517,7 +567,7 @@ mod tests {
 
     /// Percorso con i soli deviatori: la maggior parte dei test non ha bisogno
     /// degli altri oggetti.
-    fn only_diverts<'a>(diverts: &'a [(&'a Divert, Vec3)]) -> Track<'a> {
+    fn only_diverts<'a>(diverts: &'a [(&'a Divert, Heading, Vec3)]) -> Track<'a> {
         Track {
             diverts,
             turners: &[],
@@ -549,9 +599,10 @@ mod tests {
             active: true,
         };
         let deviators = [
-            (&divert, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (&divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
             (
                 &atr(),
+                Heading::Down,
                 Vec3::new(-3.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
         ];
@@ -588,7 +639,7 @@ mod tests {
             position += carrier_step(
                 &carrier,
                 position,
-                &only_diverts(&[(&atr, atr_position)]),
+                &only_diverts(&[(&atr, Heading::Down, atr_position)]),
                 DELTA,
             )
             .0;
@@ -608,7 +659,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             almost_there,
-            &only_diverts(&[(&atr, atr_position)]),
+            &only_diverts(&[(&atr, Heading::Down, atr_position)]),
             DELTA,
         );
 
@@ -630,9 +681,10 @@ mod tests {
         let live_atr = atr();
         let carrier = carrier(CarrierType::WithTube);
         let deviators = [
-            (&off_divert, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (&off_divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
             (
                 &live_atr,
+                Heading::Down,
                 Vec3::new(-2.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
         ];
@@ -657,7 +709,7 @@ mod tests {
             active: true,
         };
         let divert_position = Vec3::ZERO;
-        let diverts = [(&divert, divert_position)];
+        let diverts = [(&divert, Heading::Right, divert_position)];
         let track = only_diverts(&diverts);
 
         let mut carrier = carrier(CarrierType::WithTube);
@@ -681,7 +733,7 @@ mod tests {
     #[test]
     fn an_atr_shifts_a_rising_carrier_one_column_to_its_left() {
         let atr_position = Vec3::ZERO;
-        let diverts = [(&atr(), atr_position)];
+        let diverts = [(&atr(), Heading::Left, atr_position)];
         let track = only_diverts(&diverts);
 
         let mut carrier = carrier(CarrierType::WithTube);
@@ -705,8 +757,12 @@ mod tests {
             active: true,
         };
         let diverts = [
-            (&divert, Vec3::new(0.0, 0.0, 0.0)),
-            (&atr(), Vec3::new(GRID_STEP, 3.0 * GRID_STEP, 0.0)),
+            (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
+            (
+                &atr(),
+                Heading::Left,
+                Vec3::new(GRID_STEP, 3.0 * GRID_STEP, 0.0),
+            ),
         ];
         let track = only_diverts(&diverts);
 
@@ -728,7 +784,7 @@ mod tests {
         let turner_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, turner_position)],
+            turners: &[(&turner, Heading::Up, turner_position)],
             reversers: &[],
         };
 
@@ -744,15 +800,101 @@ mod tests {
         );
     }
 
-    /// Lo stesso oggetto su una marcia diversa: chi sale prosegue verso destra.
-    /// E' questo che permette di riportare un carrier verso il punto di partenza.
+    /// Il caso dello screenshot: flusso che sale, divert che lo sposta di una
+    /// colonna a destra e ATR che ce lo riporta. La freccia dell'ATR punta a
+    /// sinistra, ed e' li' che il carrier deve andare.
     #[test]
-    fn the_same_turner_sends_a_rising_carrier_to_the_right() {
+    fn an_atr_brings_a_rising_flow_back_to_the_divert_column() {
+        let divert = Divert {
+            kind: DivertKind::Divert,
+            active: true,
+        };
+        let diverts = [
+            (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
+            (
+                &atr(),
+                Heading::Left,
+                Vec3::new(GRID_STEP, 4.0 * GRID_STEP, 0.0),
+            ),
+        ];
+        let track = only_diverts(&diverts);
+
+        let mut carrier = carrier(CarrierType::WithTube);
+        carrier.motion = Motion::Straight(Heading::Up);
+        let end = run(&mut carrier, Vec3::new(0.0, -GRID_STEP, 0.0), &track, 900);
+
+        assert!(
+            end.x.abs() < 0.01,
+            "l'ATR deve riportarlo sulla colonna del divert, non a x = {}",
+            end.x
+        );
+        assert!(end.y > 4.0 * GRID_STEP, "e deve aver continuato a salire");
+    }
+
+    /// Una fila di carrier deve attraversare la svolta senza incastrarsi: il
+    /// primo che gira cambia direzione e gli altri devono potergli andare
+    /// dietro, non fermarsi contro di lui.
+    #[test]
+    fn a_queue_of_carriers_flows_through_a_turner() {
+        let turner = Turner { active: true };
+        let turners = [(&turner, Heading::Up, Vec3::ZERO)];
+        let track = Track {
+            diverts: &[],
+            turners: &turners,
+            reversers: &[],
+        };
+
+        let mut carriers: Vec<Carrier> = (0..3).map(|_| carrier(CarrierType::Empty)).collect();
+        // Distanziati come li emette una sorgente: mezzo secondo l'uno dall'altro.
+        let mut positions: Vec<Vec3> = (0..3)
+            .map(|index| Vec3::new((index as f32 + 1.0) * 50.0, 0.0, 0.0))
+            .collect();
+
+        for _ in 0..900 {
+            let resolved = {
+                let belt: Vec<Moving> = carriers
+                    .iter()
+                    .zip(&positions)
+                    .map(|(carrier, position)| Moving {
+                        carrier,
+                        position: *position,
+                    })
+                    .collect();
+
+                resolve_frame(&belt, &track, &[], DELTA)
+            };
+
+            for (index, (position, motion)) in resolved.into_iter().enumerate() {
+                positions[index] = position;
+                if let Some(motion) = motion {
+                    carriers[index].motion = motion;
+                }
+            }
+        }
+
+        for (index, carrier) in carriers.iter().enumerate() {
+            assert_eq!(
+                carrier.motion,
+                Motion::Straight(Heading::Up),
+                "il carrier {index} non ha girato"
+            );
+            assert!(
+                positions[index].y > 2.0 * GRID_STEP,
+                "il carrier {index} e' rimasto fermo a y = {}",
+                positions[index].y
+            );
+        }
+    }
+
+    /// La freccia decide la nuova marcia, non la vecchia: lo stesso oggetto
+    /// girato verso destra manda a destra chiunque ci passi.
+    #[test]
+    fn the_arrow_decides_the_new_heading() {
         let turner = Turner { active: true };
         let turner_position = Vec3::ZERO;
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, turner_position)],
+            turners: &[(&turner, Heading::Right, turner_position)],
             reversers: &[],
         };
 
@@ -786,7 +928,7 @@ mod tests {
         let turner = Turner { active: false };
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, Vec3::new(0.0, MAIN_LANE, 0.0))],
+            turners: &[(&turner, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0))],
             reversers: &[],
         };
 
@@ -931,7 +1073,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             position,
-            &only_diverts(&[(&atr(), position)]),
+            &only_diverts(&[(&atr(), Heading::Down, position)]),
             DELTA,
         );
 

@@ -4,14 +4,14 @@ use bevy::sprite_render::AlphaMode2d;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::Carrier;
-use crate::despawner::{self, DespawnerAssets};
-use crate::divert::{self, Divert, DivertAssets, DivertKind};
-use crate::gate::{self, Gate, GateAssets};
+use crate::divert::Divert;
+use crate::gate::Gate;
 use crate::grid;
 use crate::layout::{self, Layout, LayoutFile, LayoutObject, Placed, place_in_cell, spawn_layout};
-use crate::reverser::{self, Reverser, ReverserAssets};
-use crate::source::{self, CarrierSource, SourceAssets};
-use crate::turner::{self, Turner, TurnerAssets};
+use crate::piece::{self, Facing, PieceShapes};
+use crate::reverser::Reverser;
+use crate::source::CarrierSource;
+use crate::turner::Turner;
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -143,6 +143,11 @@ const CLICK_SLOP: f32 = 4.0;
 #[derive(Resource, Default)]
 struct PressOrigin(Option<Vec2>);
 
+/// Oggetto che si sta trascinando. Lo legge anche la camera: mentre si sposta
+/// un oggetto la vista deve restare ferma.
+#[derive(Resource, Default)]
+pub struct DraggedPiece(pub Option<Entity>);
+
 /// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse ora.
 #[derive(Component)]
 struct Ghost;
@@ -214,26 +219,6 @@ fn toggle_object(entity: Entity, switches: &mut Switches) {
     }
 }
 
-fn tool_shape(
-    tool: Tool,
-    source_assets: &SourceAssets,
-    gate_assets: &GateAssets,
-    divert_assets: &DivertAssets,
-    despawner_assets: &DespawnerAssets,
-    turner_assets: &TurnerAssets,
-    reverser_assets: &ReverserAssets,
-) -> (Handle<Mesh>, Quat) {
-    match tool {
-        Tool::CarrierSource => source::shape(source_assets),
-        Tool::Gate => gate::shape(gate_assets),
-        Tool::Divert => divert::shape(divert_assets, DivertKind::Divert),
-        Tool::Atr => divert::shape(divert_assets, DivertKind::Atr),
-        Tool::Despawner => despawner::shape(despawner_assets),
-        Tool::Turner => turner::shape(turner_assets),
-        Tool::Reverser => reverser::shape(reverser_assets),
-    }
-}
-
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
@@ -241,6 +226,7 @@ impl Plugin for EditorPlugin {
         app.init_resource::<SelectedTool>()
             .init_resource::<PressOrigin>()
             .init_resource::<SaveNotice>()
+            .init_resource::<DraggedPiece>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
             .add_systems(
                 Update,
@@ -250,6 +236,8 @@ impl Plugin for EditorPlugin {
                     update_ghost,
                     place_selected_tool,
                     toggle_by_click,
+                    rotate_piece,
+                    drag_piece,
                     handle_layout_buttons,
                     show_save_outcome,
                 ),
@@ -359,12 +347,7 @@ fn update_ghost(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     selected: Res<SelectedTool>,
     ghost_material: Res<GhostMaterial>,
-    source_assets: Res<SourceAssets>,
-    gate_assets: Res<GateAssets>,
-    divert_assets: Res<DivertAssets>,
-    despawner_assets: Res<DespawnerAssets>,
-    turner_assets: Res<TurnerAssets>,
-    reverser_assets: Res<ReverserAssets>,
+    shapes: Res<PieceShapes>,
     ui_interactions: Query<&Interaction>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
@@ -377,24 +360,17 @@ fn update_ghost(
         _ => None,
     };
 
-    let Some((tool, cell)) = target else {
+    let Some((_, cell)) = target else {
         if let Ok((_, mut visibility, _)) = ghost.single_mut() {
             *visibility = Visibility::Hidden;
         }
         return;
     };
 
-    let (mesh, rotation) = tool_shape(
-        tool,
-        &source_assets,
-        &gate_assets,
-        &divert_assets,
-        &despawner_assets,
-        &turner_assets,
-        &reverser_assets,
-    );
-    let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
-        .with_rotation(rotation);
+    // Tutti gli oggetti sono quadrati uguali: l'anteprima mostra dove finira'
+    // il prossimo, non che aspetto avra'.
+    let mesh = piece::square(&shapes);
+    let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z));
 
     match ghost.single_mut() {
         Ok((mut ghost_transform, mut visibility, mut ghost_mesh)) => {
@@ -496,7 +472,7 @@ fn place_selected_tool(
         commands.entity(entity).despawn();
     }
 
-    place_in_cell(&mut commands, tool, cell);
+    place_in_cell(&mut commands, tool, cell, Facing::default());
 }
 
 /// In modo "Sposta" il tasto sinistro trascina la vista, ma una pressione che
@@ -588,13 +564,92 @@ fn show_save_outcome(
     }
 }
 
+/// Tasto destro su un oggetto: lo gira di un quarto di giro. E' la freccia a
+/// dire dove finisce il carrier, quindi girarla cambia davvero il percorso.
+fn rotate_piece(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: Query<&Interaction>,
+    placed: Query<(Entity, &Placed)>,
+    mut facings: Query<&mut Facing>,
+) {
+    if !mouse.just_pressed(MouseButton::Right) {
+        return;
+    }
+
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+        return;
+    };
+    let Some((entity, _)) = placed.iter().find(|(_, placed)| placed.cell == cell) else {
+        return;
+    };
+
+    if let Ok(mut facing) = facings.get_mut(entity) {
+        facing.0 = facing.0.turn_right();
+    }
+}
+
+/// In modo "Sposta" il trascinamento porta con se' l'oggetto su cui si e'
+/// premuto; se sotto non c'era niente, a muoversi e' la vista.
+fn drag_piece(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: Query<&Interaction>,
+    selected: Res<SelectedTool>,
+    mut dragged: ResMut<DraggedPiece>,
+    mut placed: Query<(Entity, &mut Placed, &mut Transform)>,
+) {
+    if mouse.just_released(MouseButton::Left) {
+        dragged.0 = None;
+        return;
+    }
+
+    let Some(cell) = cursor_cell(&windows, &camera_query, &ui_interactions) else {
+        return;
+    };
+
+    if mouse.just_pressed(MouseButton::Left) {
+        dragged.0 = (selected.0 == EditorTool::Pan)
+            .then(|| {
+                placed
+                    .iter()
+                    .find(|(_, placed, _)| placed.cell == cell)
+                    .map(|(entity, _, _)| entity)
+            })
+            .flatten();
+        return;
+    }
+
+    let Some(entity) = dragged.0 else {
+        return;
+    };
+
+    // Una cella gia' occupata non si sovrascrive trascinandoci sopra: sarebbe
+    // una perdita silenziosa dell'oggetto che c'era.
+    let occupied = placed
+        .iter()
+        .any(|(other, placed, _)| other != entity && placed.cell == cell);
+    if occupied {
+        return;
+    }
+
+    if let Ok((_, mut placed, mut transform)) = placed.get_mut(entity)
+        && placed.cell != cell
+    {
+        placed.cell = cell;
+        transform.translation = grid::cell_center(cell).extend(transform.translation.z);
+    }
+}
+
 /// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in
 /// scena; il caricamento la sostituisce, carrier in volo compresi: lasciarli
 /// vivi vorrebbe dire vederli percorrere corsie che non esistono piu'.
 fn handle_layout_buttons(
     mut commands: Commands,
     buttons: Query<(&Interaction, &LayoutButton), Changed<Interaction>>,
-    placed: Query<(Entity, &Placed)>,
+    placed: Query<(Entity, &Placed, &Facing)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
     mut notice: ResMut<SaveNotice>,
@@ -609,9 +664,10 @@ fn handle_layout_buttons(
                 let layout = Layout {
                     objects: placed
                         .iter()
-                        .map(|(_, placed)| LayoutObject {
+                        .map(|(_, placed, facing)| LayoutObject {
                             tool: placed.tool,
                             cell: (placed.cell.x, placed.cell.y),
+                            facing: *facing,
                         })
                         .collect(),
                 };
@@ -632,7 +688,7 @@ fn handle_layout_buttons(
 
             LayoutAction::Load => match layout::load(&layout_file.path) {
                 Ok(layout) => {
-                    for (entity, _) in placed.iter() {
+                    for (entity, _, _) in placed.iter() {
                         commands.entity(entity).despawn();
                     }
                     for entity in carriers.iter() {

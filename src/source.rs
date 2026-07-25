@@ -1,12 +1,10 @@
-use std::f32::consts::FRAC_PI_2;
-
 use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_SIZE, Carrier, NextCarrierId, spawn_random_carrier};
+use crate::piece::{self, Arrow, Facing, PieceShapes};
 use crate::simulation::SimulationState;
 
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
-pub const SOURCE_SIZE: f32 = 34.0;
 
 /// Oggetto che immette carrier nel flusso. Ogni sorgente ha il proprio timer,
 /// cosi' due sorgenti piazzate in momenti diversi restano indipendenti.
@@ -40,28 +38,15 @@ impl Plugin for SourceVisualsPlugin {
 
 #[derive(Resource)]
 pub struct SourceAssets {
-    mesh: Handle<Mesh>,
     active_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
-fn setup_source_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
+fn setup_source_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(SourceAssets {
-        mesh: meshes.add(RegularPolygon::new(SOURCE_SIZE / 2.0, 3)),
         active_material: materials.add(Color::srgb(0.2, 0.5, 1.0)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
-}
-
-/// Mesh e orientamento della sorgente: il triangolo punta a sinistra, nel verso
-/// in cui partono i carrier. La usa anche l'anteprima dell'editor, cosi' quello
-/// che si vede prima del clic non puo' discostarsi da quello che viene piazzato.
-pub fn shape(assets: &SourceAssets) -> (Handle<Mesh>, Quat) {
-    (assets.mesh.clone(), Quat::from_rotation_z(FRAC_PI_2))
 }
 
 fn material_for(assets: &SourceAssets, active: bool) -> Handle<ColorMaterial> {
@@ -74,17 +59,18 @@ fn material_for(assets: &SourceAssets, active: bool) -> Handle<ColorMaterial> {
 
 fn attach_source_visuals(
     mut commands: Commands,
+    shapes: Res<PieceShapes>,
     assets: Res<SourceAssets>,
-    sources: Query<(Entity, &CarrierSource, &mut Transform), Without<Mesh2d>>,
+    sources: Query<(Entity, &CarrierSource), Without<Mesh2d>>,
 ) {
-    let (mesh, rotation) = shape(&assets);
-
-    for (entity, source, mut transform) in sources {
-        transform.rotation = rotation;
-        commands.entity(entity).insert((
-            Mesh2d(mesh.clone()),
-            MeshMaterial2d(material_for(&assets, source.active)),
-        ));
+    for (entity, source) in sources.iter() {
+        piece::dress(
+            &mut commands,
+            entity,
+            &shapes,
+            material_for(&assets, source.active),
+            Arrow::Straight,
+        );
     }
 }
 
@@ -112,11 +98,11 @@ pub fn spawn_source(commands: &mut Commands, position: Vec3) -> Entity {
 fn spawn_from_sources(
     mut commands: Commands,
     time: Res<Time>,
-    mut sources: Query<(&mut CarrierSource, &Transform)>,
+    mut sources: Query<(&mut CarrierSource, &Facing, &Transform)>,
     carriers: Query<&Transform, With<Carrier>>,
     mut ids: ResMut<NextCarrierId>,
 ) {
-    for (mut source, transform) in sources.iter_mut() {
+    for (mut source, facing, transform) in sources.iter_mut() {
         // Da spenta non emette e non conta nemmeno il tempo: riaccesa riparte
         // da dov'era, invece di recuperare l'attesa in un colpo solo.
         if !source.active {
@@ -139,6 +125,6 @@ fn spawn_from_sources(
             continue;
         }
 
-        spawn_random_carrier(&mut commands, position, &mut ids);
+        spawn_random_carrier(&mut commands, position, facing.0, &mut ids);
     }
 }

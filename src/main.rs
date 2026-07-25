@@ -16,6 +16,7 @@ mod gate;
 mod geometry;
 mod grid;
 mod layout;
+mod piece;
 mod reverser;
 mod simulation;
 mod source;
@@ -30,6 +31,7 @@ use editor::EditorPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
+use piece::PiecePlugin;
 use reverser::ReverserVisualsPlugin;
 use simulation::{SimulationControlsPlugin, SimulationPlugin};
 use source::{SourcePlugin, SourceVisualsPlugin};
@@ -72,6 +74,7 @@ fn main() {
         .add_plugins((
             CameraPlugin,
             GridPlugin,
+            PiecePlugin,
             EditorPlugin,
             SimulationControlsPlugin,
             CarrierVisualsPlugin,
