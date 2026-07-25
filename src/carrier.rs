@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use rand::prelude::*;
 
 use crate::WORK_AREA_LEFT;
-use crate::divert::Divert;
+use crate::divert::{DIVERT_ZONE_HALF_WIDTH, Divert};
 use crate::gate::{Gate, blocks_circle};
 
 pub const BELT_SPEED: f32 = 100.0;
@@ -19,7 +19,14 @@ pub enum CarrierType {
 }
 
 #[derive(Component)]
-pub struct Carrier(pub CarrierType);
+pub struct Carrier {
+    pub kind: CarrierType,
+    /// Quota della sorgente da cui e' partito. E' la corsia "di casa": il divert
+    /// lo porta una corsia piu' su, l'ATR lo riporta esattamente qui. Legarla al
+    /// carrier invece che al marcatore fa si' che il rientro sia sulla linea
+    /// della sorgente, ovunque si piazzino i deviatori.
+    pub home_lane: f32,
+}
 
 #[derive(Component)]
 pub struct Tube;
@@ -68,7 +75,10 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
             Mesh2d(assets.with_tube_mesh.clone()),
             MeshMaterial2d(assets.with_tube_material.clone()),
             Transform::from_translation(position),
-            Carrier(CarrierType::WithTube),
+            Carrier {
+                kind: CarrierType::WithTube,
+                home_lane: position.y,
+            },
             children![Tube],
         ));
     } else {
@@ -76,23 +86,43 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
             Mesh2d(assets.empty_mesh.clone()),
             MeshMaterial2d(assets.empty_material.clone()),
             Transform::from_translation(position),
-            Carrier(CarrierType::Empty),
+            Carrier {
+                kind: CarrierType::Empty,
+                home_lane: position.y,
+            },
         ));
     }
 }
 
-/// Solo i carrier con tubo vengono deviati; gli altri tirano dritto sulla corsia.
-fn carrier_velocity(carrier: &Carrier, translation: Vec3, diverts: &[(&Divert, Vec3)]) -> Vec3 {
-    let straight = Vec3::new(-BELT_SPEED, 0.0, 0.0);
+/// Spostamento di un carrier in questo frame. Solo i carrier con tubo vengono
+/// deviati; gli altri tirano dritto sulla corsia.
+fn carrier_step(
+    carrier: &Carrier,
+    translation: Vec3,
+    diverts: &[(&Divert, Vec3)],
+    delta_secs: f32,
+) -> Vec3 {
+    let straight = Vec3::new(-BELT_SPEED * delta_secs, 0.0, 0.0);
 
-    if carrier.0 != CarrierType::WithTube {
+    if carrier.kind != CarrierType::WithTube {
         return straight;
     }
 
     for (divert, position) in diverts {
-        if divert.catches(*position, translation) {
-            return Vec3::new(-CARRIER_DIVERT_SPEED, divert.lift_sign() * BELT_SPEED, 0.0);
+        if !divert.catches(*position, translation) {
+            continue;
         }
+
+        // Il passo verticale non supera mai la quota di destinazione: e' questo
+        // che fa arrivare il carrier esattamente sulla corsia voluta, invece di
+        // lasciarlo dove capita quando esce dalla finestra del deviatore.
+        let reach = BELT_SPEED * delta_secs;
+        let lift = (divert.target_y(carrier.home_lane) - translation.y).clamp(-reach, reach);
+        if lift == 0.0 {
+            break;
+        }
+
+        return Vec3::new(-CARRIER_DIVERT_SPEED * delta_secs, lift, 0.0);
     }
 
     straight
@@ -126,7 +156,7 @@ fn move_carrier(
             (
                 entity,
                 translation,
-                carrier_velocity(carrier, translation, &diverts) * delta_secs,
+                carrier_step(carrier, translation, &diverts, delta_secs),
             )
         })
         .collect();
@@ -155,6 +185,76 @@ fn move_carrier(
         if let Ok((_, _, mut transform)) = query.get_mut(entity) {
             transform.translation = translation;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::divert::{DivertKind, LANE_HEIGHT};
+
+    const DELTA: f32 = 1.0 / 60.0;
+
+    const SOURCE_LANE: f32 = -120.0;
+
+    fn atr() -> Divert {
+        Divert {
+            kind: DivertKind::Atr,
+            active: true,
+        }
+    }
+
+    fn carrier(kind: CarrierType) -> Carrier {
+        Carrier {
+            kind,
+            home_lane: SOURCE_LANE,
+        }
+    }
+
+    /// Lo scenario dello screenshot: ATR piazzato sulla corsia deviata, per giunta
+    /// non perfettamente allineato. Il carrier deve comunque tornare sulla linea
+    /// della sorgente, non fermarsi qualche pixel sotto il marcatore.
+    #[test]
+    fn atr_lands_carriers_on_the_source_lane() {
+        let atr = atr();
+        let atr_position = Vec3::new(0.0, SOURCE_LANE + LANE_HEIGHT - 7.0, 0.0);
+        let carrier = carrier(CarrierType::WithTube);
+        let mut position = Vec3::new(DIVERT_ZONE_HALF_WIDTH, SOURCE_LANE + LANE_HEIGHT, 0.0);
+
+        for _ in 0..200 {
+            position += carrier_step(&carrier, position, &[(&atr, atr_position)], DELTA);
+        }
+
+        assert_eq!(
+            position.y, SOURCE_LANE,
+            "il flusso deve tornare sulla linea della sorgente"
+        );
+    }
+
+    /// Il passo verticale si accorcia sull'ultimo tratto invece di scavalcare la quota.
+    #[test]
+    fn the_last_step_does_not_overshoot() {
+        let atr = atr();
+        let carrier = carrier(CarrierType::WithTube);
+        let almost_there = Vec3::new(0.0, SOURCE_LANE + 1.0, 0.0);
+
+        let atr_position = Vec3::new(0.0, SOURCE_LANE, 0.0);
+        let step = carrier_step(&carrier, almost_there, &[(&atr, atr_position)], DELTA);
+
+        assert_eq!(step.y, -1.0, "scende solo il px che manca");
+        assert!(
+            BELT_SPEED * DELTA > 1.0,
+            "senza il limite avrebbe scavalcato la quota"
+        );
+    }
+
+    #[test]
+    fn empty_carriers_are_never_diverted() {
+        let carrier = carrier(CarrierType::Empty);
+        let position = Vec3::new(0.0, SOURCE_LANE + LANE_HEIGHT, 0.0);
+        let step = carrier_step(&carrier, position, &[(&atr(), position)], DELTA);
+
+        assert_eq!(step.y, 0.0);
     }
 }
 

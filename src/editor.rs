@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::WORK_AREA_LEFT;
-use crate::divert::{Divert, DivertAssets, DivertDirection, spawn_divert, toggle_divert_at};
+use crate::divert::{Divert, DivertAssets, DivertKind, spawn_divert, toggle_divert_at};
 use crate::gate::{Gate, GateAssets, spawn_gate, toggle_gate_at};
 use crate::source::{SourceAssets, spawn_source};
 
@@ -15,25 +15,20 @@ const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 pub enum Tool {
     CarrierSource,
     Gate,
-    DivertUp,
-    DivertDown,
+    Divert,
+    Atr,
 }
 
 /// Ordine dei bottoni nella barra.
-const TOOLS: [Tool; 4] = [
-    Tool::CarrierSource,
-    Tool::Gate,
-    Tool::DivertUp,
-    Tool::DivertDown,
-];
+const TOOLS: [Tool; 4] = [Tool::CarrierSource, Tool::Gate, Tool::Divert, Tool::Atr];
 
 impl Tool {
     fn label(self) -> &'static str {
         match self {
             Tool::CarrierSource => "Sorgente",
             Tool::Gate => "Gate",
-            Tool::DivertUp => "Divert su",
-            Tool::DivertDown => "Divert giu'",
+            Tool::Divert => "Divert",
+            Tool::Atr => "ATR",
         }
     }
 }
@@ -181,14 +176,7 @@ fn place_selected_tool(
     match selected.0 {
         Tool::CarrierSource => spawn_source(&mut commands, &source_assets, position),
         Tool::Gate => spawn_gate(&mut commands, &gate_assets, position),
-        Tool::DivertUp => {
-            spawn_divert(&mut commands, &divert_assets, position, DivertDirection::Up)
-        }
-        Tool::DivertDown => spawn_divert(
-            &mut commands,
-            &divert_assets,
-            position,
-            DivertDirection::Down,
-        ),
+        Tool::Divert => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Divert),
+        Tool::Atr => spawn_divert(&mut commands, &divert_assets, position, DivertKind::Atr),
     }
 }

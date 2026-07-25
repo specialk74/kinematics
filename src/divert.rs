@@ -4,29 +4,47 @@ use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 
 pub const DIVERT_SIZE: f32 = 30.0;
-/// Semilarghezza della finestra orizzontale in cui il divert agisce. E' questa a
-/// decidere di quanto sale la corsia deviata: il carrier viene spinto in verticale
-/// per tutto il tempo che impiega ad attraversarla.
-pub const DIVERT_ZONE_HALF_WIDTH: f32 = 16.0;
-/// Sotto questo dislivello il carrier e' considerato "arrivato" sulla quota del divert.
+/// Dislivello fra la corsia principale e quella deviata.
+pub const LANE_HEIGHT: f32 = 64.0;
+/// Semilarghezza della finestra orizzontale in cui il deviatore aggancia i carrier.
+/// Deve bastare a completare il cambio di corsia: servono
+/// `LANE_HEIGHT * CARRIER_DIVERT_SPEED / BELT_SPEED` = 32 px orizzontali.
+pub const DIVERT_ZONE_HALF_WIDTH: f32 = 24.0;
+/// Margine verticale con cui si riconosce un carrier "sulla corsia".
 const DIVERT_LANE_TOLERANCE: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DivertDirection {
-    Up,
-    Down,
+pub enum DivertKind {
+    /// Uscita: porta i carrier sulla corsia deviata.
+    Divert,
+    /// Rientro: riporta i carrier sulla corsia principale.
+    Atr,
 }
 
-/// Deviatore: fa uscire i carrier dalla corsia (`Up`) o ce li fa rientrare (`Down`).
-/// Se ne piazza uno per estremo della corsia deviata.
+/// Deviatore. Se ne piazza uno per estremo della corsia deviata: un `Divert`
+/// dove i carrier devono uscire, un `Atr` dove devono rientrare.
 #[derive(Component)]
 pub struct Divert {
-    pub direction: DivertDirection,
+    pub kind: DivertKind,
     pub active: bool,
 }
 
 impl Divert {
-    /// Vero se il divert, piazzato in `position`, sta deviando il carrier in `carrier`.
+    /// Quota a cui questo deviatore porta un carrier partito da `home_lane`.
+    /// E' il punto fisso del movimento: il carrier ci arriva esatto e li' smette
+    /// di salire o scendere. Nota che non dipende da dove e' piazzato il
+    /// deviatore, ma dalla corsia della sorgente: e' cosi' che l'ATR riporta il
+    /// flusso sulla linea di partenza anche se lo piazzi sulla corsia deviata.
+    pub fn target_y(&self, home_lane: f32) -> f32 {
+        match self.kind {
+            DivertKind::Divert => home_lane + LANE_HEIGHT,
+            DivertKind::Atr => home_lane,
+        }
+    }
+
+    /// Vero se il deviatore, piazzato in `position`, sta agganciando il carrier.
+    /// La fascia copre una corsia sopra e una sotto, cosi' il marcatore lavora
+    /// sia che lo si metta sulla corsia principale sia su quella deviata.
     pub fn catches(&self, position: Vec3, carrier: Vec3) -> bool {
         if !self.active {
             return false;
@@ -36,22 +54,7 @@ impl Divert {
             return false;
         }
 
-        match self.direction {
-            // L'uscita spinge in alto tutto quello che gli passa sopra: quanto sale
-            // dipende solo da quanto ci mette ad attraversare la finestra.
-            DivertDirection::Up => carrier.y >= position.y - DIVERT_LANE_TOLERANCE,
-            // Il rientro agisce solo su chi sta piu' in alto di lui e smette da
-            // solo quando il carrier e' tornato sulla sua quota.
-            DivertDirection::Down => carrier.y > position.y + DIVERT_LANE_TOLERANCE,
-        }
-    }
-
-    /// Verso della spinta verticale: la velocita' vera la decide il carrier.
-    pub fn lift_sign(&self) -> f32 {
-        match self.direction {
-            DivertDirection::Up => 1.0,
-            DivertDirection::Down => -1.0,
-        }
+        (carrier.y - position.y).abs() <= LANE_HEIGHT + DIVERT_LANE_TOLERANCE
     }
 }
 
@@ -82,31 +85,28 @@ fn setup_divert_assets(
     });
 }
 
-/// Piazza un divert gia' attivo. Il triangolo e' ruotato nel verso della deviazione.
+/// Piazza un deviatore gia' attivo. Il triangolo punta nel verso della deviazione.
 pub fn spawn_divert(
     commands: &mut Commands,
     assets: &DivertAssets,
     position: Vec3,
-    direction: DivertDirection,
+    kind: DivertKind,
 ) {
-    let rotation = match direction {
-        DivertDirection::Up => 0.0,
-        DivertDirection::Down => PI,
+    let rotation = match kind {
+        DivertKind::Divert => 0.0,
+        DivertKind::Atr => PI,
     };
 
     commands.spawn((
         Mesh2d(assets.mesh.clone()),
         MeshMaterial2d(assets.active_material.clone()),
         Transform::from_translation(position).with_rotation(Quat::from_rotation_z(rotation)),
-        Divert {
-            direction,
-            active: true,
-        },
+        Divert { kind, active: true },
     ));
 }
 
-/// Commuta il divert sotto al punto indicato, colore compreso. Restituisce `false`
-/// se li' non c'e' nessun divert, cosi' chi chiama sa che il clic e' ancora libero.
+/// Commuta il deviatore sotto al punto indicato, colore compreso. Restituisce
+/// `false` se li' non c'e' niente, cosi' chi chiama sa che il clic e' ancora libero.
 pub fn toggle_divert_at<F: QueryFilter>(
     position: Vec2,
     diverts: &mut Query<(&mut Divert, &Transform, &mut MeshMaterial2d<ColorMaterial>), F>,
@@ -127,7 +127,7 @@ pub fn toggle_divert_at<F: QueryFilter>(
     false
 }
 
-/// Vero se il punto cade sul divert (usato per i click).
+/// Vero se il punto cade sul deviatore (usato per i click).
 fn contains(divert: Vec3, point: Vec2) -> bool {
     (point - divert.truncate())
         .abs()
@@ -139,25 +139,49 @@ fn contains(divert: Vec3, point: Vec2) -> bool {
 mod tests {
     use super::*;
 
-    fn divert(direction: DivertDirection) -> Divert {
-        Divert {
-            direction,
-            active: true,
-        }
+    fn divert(kind: DivertKind) -> Divert {
+        Divert { kind, active: true }
     }
 
     #[test]
-    fn exit_divert_lifts_carriers_on_its_lane() {
-        let up = divert(DivertDirection::Up);
+    fn the_two_kinds_target_opposite_lanes() {
+        assert_eq!(divert(DivertKind::Divert).target_y(0.0), LANE_HEIGHT);
+        assert_eq!(divert(DivertKind::Atr).target_y(0.0), 0.0);
+    }
+
+    /// Il caso che conta: l'ATR piazzato sulla corsia deviata deve comunque
+    /// riportare il carrier sulla linea della sorgente, non sulla propria.
+    #[test]
+    fn atr_targets_the_source_lane_even_when_placed_on_the_diverted_lane() {
+        let source_lane = -120.0;
+        let atr = divert(DivertKind::Atr);
+        let atr_position = Vec3::new(0.0, source_lane + LANE_HEIGHT, 0.0);
+        let carrier = Vec3::new(0.0, source_lane + LANE_HEIGHT, 0.0);
+
+        assert!(atr.catches(atr_position, carrier));
+        assert_eq!(atr.target_y(source_lane), source_lane);
+    }
+
+    #[test]
+    fn a_deviator_works_from_either_lane() {
+        let up = divert(DivertKind::Divert);
         let position = Vec3::ZERO;
 
         assert!(
             up.catches(position, Vec3::new(0.0, 0.0, 0.0)),
-            "carrier in arrivo"
+            "corsia propria"
         );
         assert!(
             up.catches(position, Vec3::new(-10.0, 30.0, 0.0)),
-            "sta ancora salendo dentro la finestra"
+            "a meta' del cambio di corsia"
+        );
+        assert!(
+            up.catches(position, Vec3::new(0.0, LANE_HEIGHT, 0.0)),
+            "una corsia piu' su: e' il caso dell'ATR piazzato in alto"
+        );
+        assert!(
+            !up.catches(position, Vec3::new(0.0, 2.0 * LANE_HEIGHT, 0.0)),
+            "due corsie piu' su: troppo lontano"
         );
         assert!(
             !up.catches(position, Vec3::new(60.0, 0.0, 0.0)),
@@ -166,23 +190,8 @@ mod tests {
     }
 
     #[test]
-    fn rejoin_divert_only_touches_carriers_above_it() {
-        let down = divert(DivertDirection::Down);
-        let position = Vec3::ZERO;
-
-        assert!(
-            down.catches(position, Vec3::new(0.0, 64.0, 0.0)),
-            "carrier sulla corsia deviata: deve scendere"
-        );
-        assert!(
-            !down.catches(position, Vec3::new(0.0, 0.0, 0.0)),
-            "carrier gia' sulla corsia principale: non deve essere spinto sotto"
-        );
-    }
-
-    #[test]
     fn inactive_divert_lets_everything_through() {
-        let mut up = divert(DivertDirection::Up);
+        let mut up = divert(DivertKind::Divert);
         up.active = false;
 
         assert!(!up.catches(Vec3::ZERO, Vec3::ZERO));
