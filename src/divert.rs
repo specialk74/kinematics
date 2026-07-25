@@ -66,11 +66,14 @@ impl Divert {
     }
 }
 
-pub struct DivertPlugin;
+/// Come il gate: la deviazione la applica il movimento dei carrier, qui resta
+/// solo l'aspetto.
+pub struct DivertVisualsPlugin;
 
-impl Plugin for DivertPlugin {
+impl Plugin for DivertVisualsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_divert_assets);
+        app.add_systems(Startup, setup_divert_assets)
+            .add_systems(Update, (attach_divert_visuals, refresh_divert_colour));
     }
 }
 
@@ -105,36 +108,46 @@ pub fn shape(assets: &DivertAssets, kind: DivertKind) -> (Handle<Mesh>, Quat) {
 }
 
 /// Piazza un deviatore gia' attivo.
-pub fn spawn_divert(
-    commands: &mut Commands,
-    assets: &DivertAssets,
-    position: Vec3,
-    kind: DivertKind,
-) -> Entity {
-    let (mesh, rotation) = shape(assets, kind);
-
+pub fn spawn_divert(commands: &mut Commands, position: Vec3, kind: DivertKind) -> Entity {
     commands
         .spawn((
-            Mesh2d(mesh),
-            MeshMaterial2d(assets.active_material.clone()),
-            Transform::from_translation(position).with_rotation(rotation),
+            Transform::from_translation(position),
             Divert { kind, active: true },
         ))
         .id()
 }
 
-/// Accende o spegne il deviatore, colore compreso.
-pub fn toggle_divert(
-    divert: &mut Divert,
-    material: &mut MeshMaterial2d<ColorMaterial>,
-    assets: &DivertAssets,
-) {
-    divert.active = !divert.active;
-    material.0 = if divert.active {
+fn material_for(assets: &DivertAssets, active: bool) -> Handle<ColorMaterial> {
+    if active {
         assets.active_material.clone()
     } else {
         assets.idle_material.clone()
-    };
+    }
+}
+
+fn attach_divert_visuals(
+    mut commands: Commands,
+    assets: Res<DivertAssets>,
+    diverts: Query<(Entity, &Divert, &mut Transform), Without<Mesh2d>>,
+) {
+    for (entity, divert, mut transform) in diverts {
+        let (mesh, rotation) = shape(&assets, divert.kind);
+        transform.rotation = rotation;
+
+        commands.entity(entity).insert((
+            Mesh2d(mesh),
+            MeshMaterial2d(material_for(&assets, divert.active)),
+        ));
+    }
+}
+
+fn refresh_divert_colour(
+    assets: Res<DivertAssets>,
+    diverts: Query<(&Divert, &mut MeshMaterial2d<ColorMaterial>), Changed<Divert>>,
+) {
+    for (divert, mut material) in diverts {
+        material.0 = material_for(&assets, divert.active);
+    }
 }
 
 #[cfg(test)]

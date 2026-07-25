@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::WORK_AREA_LEFT;
 use crate::carrier::Carrier;
-use crate::divert::{self, Divert, DivertAssets, DivertKind, spawn_divert, toggle_divert};
-use crate::gate::{self, Gate, GateAssets, spawn_gate, toggle_gate};
+use crate::divert::{self, Divert, DivertAssets, DivertKind};
+use crate::gate::{self, Gate, GateAssets};
 use crate::grid;
-use crate::layout::{self, Layout, LayoutFile, LayoutObject};
-use crate::source::{self, SourceAssets, spawn_source};
+use crate::layout::{self, Layout, LayoutFile, LayoutObject, Placed, place_in_cell, spawn_layout};
+use crate::source::{self, SourceAssets};
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -75,15 +75,6 @@ impl LayoutAction {
 #[derive(Component)]
 struct LayoutButton(LayoutAction);
 
-/// Oggetto appoggiato sulla griglia. Tiene la cella e lo strumento che l'ha
-/// creato: bastano a sapere cosa c'e' in una cella senza interrogare i singoli
-/// moduli, e a decidere se un clic sostituisce o commuta.
-#[derive(Component)]
-struct Placed {
-    tool: Tool,
-    cell: IVec2,
-}
-
 /// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse ora.
 #[derive(Component)]
 struct Ghost;
@@ -131,59 +122,12 @@ fn tool_shape(
     }
 }
 
-/// Unico punto in cui nasce un oggetto della scena: lo usano sia il clic sia il
-/// caricamento da file, cosi' un layout ricaricato e' indistinguibile da uno
-/// costruito a mano.
-fn place_in_cell(
-    commands: &mut Commands,
-    tool: Tool,
-    cell: IVec2,
-    source_assets: &SourceAssets,
-    gate_assets: &GateAssets,
-    divert_assets: &DivertAssets,
-) {
-    let position = grid::cell_center(cell).extend(1.0);
-    let object = match tool {
-        Tool::CarrierSource => spawn_source(commands, source_assets, position),
-        Tool::Gate => spawn_gate(commands, gate_assets, position),
-        Tool::Divert => spawn_divert(commands, divert_assets, position, DivertKind::Divert),
-        Tool::Atr => spawn_divert(commands, divert_assets, position, DivertKind::Atr),
-    };
-
-    commands.entity(object).insert(Placed { tool, cell });
-}
-
-/// Ricostruisce in scena gli oggetti di un layout letto da file.
-fn spawn_layout(
-    commands: &mut Commands,
-    layout: &Layout,
-    source_assets: &SourceAssets,
-    gate_assets: &GateAssets,
-    divert_assets: &DivertAssets,
-) {
-    for object in &layout.objects {
-        place_in_cell(
-            commands,
-            object.tool,
-            IVec2::new(object.cell.0, object.cell.1),
-            source_assets,
-            gate_assets,
-            divert_assets,
-        );
-    }
-
-    info!("caricati {} oggetti", layout.objects.len());
-}
-
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
-            // In PostStartup: gli asset degli oggetti nascono in Startup e fra
-            // sistemi dello stesso schedule l'ordine non e' garantito.
-            .add_systems(PostStartup, load_layout_at_startup)
             .add_systems(
                 Update,
                 (
@@ -376,11 +320,8 @@ fn place_selected_tool(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     placed: Query<(Entity, &Placed)>,
     ui_interactions: Query<&Interaction>,
-    mut gates: Query<(&mut Gate, &mut MeshMaterial2d<ColorMaterial>), Without<Divert>>,
-    mut diverts: Query<(&mut Divert, &mut MeshMaterial2d<ColorMaterial>), Without<Gate>>,
-    gate_assets: Res<GateAssets>,
-    divert_assets: Res<DivertAssets>,
-    source_assets: Res<SourceAssets>,
+    mut gates: Query<&mut Gate>,
+    mut diverts: Query<&mut Divert>,
     selected: Res<SelectedTool>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -398,11 +339,13 @@ fn place_selected_tool(
         .find(|(_, occupant)| occupant.cell == cell)
         .map(|(entity, occupant)| (entity, occupant.tool))
     {
+        // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
+        // aggiorna il modulo dell'oggetto guardando lo stato.
         if occupant == tool {
-            if let Ok((mut gate, mut material)) = gates.get_mut(entity) {
-                toggle_gate(&mut gate, &mut material, &gate_assets);
-            } else if let Ok((mut divert, mut material)) = diverts.get_mut(entity) {
-                toggle_divert(&mut divert, &mut material, &divert_assets);
+            if let Ok(mut gate) = gates.get_mut(entity) {
+                gate.active = !gate.active;
+            } else if let Ok(mut divert) = diverts.get_mut(entity) {
+                divert.active = !divert.active;
             }
             return;
         }
@@ -410,42 +353,7 @@ fn place_selected_tool(
         commands.entity(entity).despawn();
     }
 
-    place_in_cell(
-        &mut commands,
-        tool,
-        cell,
-        &source_assets,
-        &gate_assets,
-        &divert_assets,
-    );
-}
-
-/// Apre il layout passato sulla riga di comando. Un file che non si legge viene
-/// segnalato e basta: si parte a scena vuota, cosi' si puo' comunque costruirlo
-/// e salvarlo su quel nome.
-fn load_layout_at_startup(
-    mut commands: Commands,
-    layout_file: Res<LayoutFile>,
-    source_assets: Res<SourceAssets>,
-    gate_assets: Res<GateAssets>,
-    divert_assets: Res<DivertAssets>,
-) {
-    info!("file di layout: {}", layout_file.path);
-
-    if !layout_file.load_at_startup {
-        return;
-    }
-
-    match layout::load(&layout_file.path) {
-        Ok(layout) => spawn_layout(
-            &mut commands,
-            &layout,
-            &source_assets,
-            &gate_assets,
-            &divert_assets,
-        ),
-        Err(error) => error!("non riesco ad aprire {}: {error}", layout_file.path),
-    }
+    place_in_cell(&mut commands, tool, cell);
 }
 
 /// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in
@@ -457,9 +365,6 @@ fn handle_layout_buttons(
     placed: Query<(Entity, &Placed)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
-    source_assets: Res<SourceAssets>,
-    gate_assets: Res<GateAssets>,
-    divert_assets: Res<DivertAssets>,
 ) {
     for (interaction, button) in buttons.iter() {
         if *interaction != Interaction::Pressed {
@@ -493,13 +398,7 @@ fn handle_layout_buttons(
                         commands.entity(entity).despawn();
                     }
 
-                    spawn_layout(
-                        &mut commands,
-                        &layout,
-                        &source_assets,
-                        &gate_assets,
-                        &divert_assets,
-                    );
+                    spawn_layout(&mut commands, &layout);
                 }
                 Err(error) => error!("caricamento fallito: {error}"),
             },

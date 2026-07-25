@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 use rand::prelude::*;
 
-use crate::WORK_AREA_LEFT;
 use crate::divert::Divert;
 use crate::gate::{Gate, blocks_circle};
 use crate::simulation::SimulationState;
+use crate::{WORK_AREA_BOTTOM, WORK_AREA_LEFT, WORK_AREA_RIGHT, WORK_AREA_TOP};
 
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
@@ -29,14 +29,26 @@ pub struct Carrier {
 #[derive(Component)]
 pub struct Tube;
 
+/// La cinematica: nessun riferimento a mesh, materiali o camera, cosi' gira
+/// anche senza interfaccia.
 pub struct CarrierPlugin;
 
 impl Plugin for CarrierPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_carrier_assets).add_systems(
+        app.add_systems(
             Update,
             (move_carrier, despawn_offscreen).run_if(in_state(SimulationState::Running)),
         );
+    }
+}
+
+/// L'aspetto dei carrier: si monta solo quando c'e' l'interfaccia.
+pub struct CarrierVisualsPlugin;
+
+impl Plugin for CarrierVisualsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_carrier_assets)
+            .add_systems(Update, attach_carrier_visuals);
     }
 }
 
@@ -67,13 +79,34 @@ fn setup_carrier_assets(
     });
 }
 
+/// Da' un corpo ai carrier appena nati. Senza questo sistema esistono lo stesso e
+/// si muovono: semplicemente non li vede nessuno.
+fn attach_carrier_visuals(
+    mut commands: Commands,
+    assets: Res<CarrierAssets>,
+    carriers: Query<(Entity, &Carrier), Without<Mesh2d>>,
+) {
+    for (entity, carrier) in carriers.iter() {
+        let (mesh, material) = match carrier.kind {
+            CarrierType::WithTube => (
+                assets.with_tube_mesh.clone(),
+                assets.with_tube_material.clone(),
+            ),
+            CarrierType::Empty => (assets.empty_mesh.clone(), assets.empty_material.clone()),
+        };
+
+        commands
+            .entity(entity)
+            .insert((Mesh2d(mesh), MeshMaterial2d(material)));
+    }
+}
+
 /// Immette un carrier nel flusso; il tipo (vuoto o con tubo) e' casuale 50-50.
-pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, position: Vec3) {
+pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3) {
     let mut rng = rand::rng();
+
     if rng.random::<u32>() > u32::MAX / 2 {
         commands.spawn((
-            Mesh2d(assets.with_tube_mesh.clone()),
-            MeshMaterial2d(assets.with_tube_material.clone()),
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::WithTube,
@@ -82,8 +115,6 @@ pub fn spawn_random_carrier(commands: &mut Commands, assets: &CarrierAssets, pos
         ));
     } else {
         commands.spawn((
-            Mesh2d(assets.empty_mesh.clone()),
-            MeshMaterial2d(assets.empty_material.clone()),
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::Empty,
@@ -318,24 +349,19 @@ mod tests {
     }
 }
 
-fn despawn_offscreen(
-    mut commands: Commands,
-    query: Query<(Entity, &Transform), With<Carrier>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-) {
-    let (camera, camera_transform) = camera_query.single().unwrap();
-    for (entity, transform) in query.iter() {
-        // Fine corsa: il carrier e' scomparso sotto la barra degli strumenti.
-        if transform.translation.x + CARRIER_RADIUS < WORK_AREA_LEFT {
-            commands.entity(entity).despawn();
-            continue;
-        }
+/// Vero se il carrier ha lasciato del tutto l'area di lavoro. Il conto e' sui
+/// confini noti dell'area, non sulla camera: cosi' vale anche senza interfaccia.
+fn outside_work_area(translation: Vec3) -> bool {
+    translation.x + CARRIER_RADIUS < WORK_AREA_LEFT
+        || translation.x - CARRIER_RADIUS > WORK_AREA_RIGHT
+        || translation.y + CARRIER_RADIUS < WORK_AREA_BOTTOM
+        || translation.y - CARRIER_RADIUS > WORK_AREA_TOP
+}
 
-        if let Some(pos) = camera.world_to_ndc(camera_transform, transform.translation) {
-            // Add a buffer (e.g., 1.2 instead of 1.0) to hide things before they pop out
-            if pos.x.abs() > 1.2 || pos.y.abs() > 1.2 {
-                commands.entity(entity).despawn();
-            }
+fn despawn_offscreen(mut commands: Commands, query: Query<(Entity, &Transform), With<Carrier>>) {
+    for (entity, transform) in query.iter() {
+        if outside_work_area(transform.translation) {
+            commands.entity(entity).despawn();
         }
     }
 }

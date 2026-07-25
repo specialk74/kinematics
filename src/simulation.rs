@@ -19,12 +19,22 @@ struct PauseButton;
 #[derive(Component)]
 struct PauseLabel;
 
+/// Solo lo stato: serve anche senza interfaccia, perche' e' quello che i sistemi
+/// di simulazione interrogano per sapere se devono girare.
 pub struct SimulationPlugin;
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<SimulationState>()
-            .add_systems(Startup, setup_pause_button)
+        app.init_state::<SimulationState>();
+    }
+}
+
+/// Il bottone play/pausa, cioe' il modo umano di cambiare quello stato.
+pub struct SimulationControlsPlugin;
+
+impl Plugin for SimulationControlsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup_pause_button)
             .add_systems(Update, (toggle_simulation, refresh_pause_button));
     }
 }

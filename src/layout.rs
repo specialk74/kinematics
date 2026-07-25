@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::divert::DivertKind;
 use crate::editor::Tool;
 
 /// File usato quando non se ne passa uno sulla riga di comando. Il percorso e'
@@ -61,6 +62,68 @@ pub struct LayoutObject {
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
     pub objects: Vec<LayoutObject>,
+}
+
+/// Oggetto appoggiato sulla griglia. Tiene la cella e lo strumento che l'ha
+/// creato: bastano a sapere cosa c'e' in una cella e a riscrivere il file.
+#[derive(Component)]
+pub struct Placed {
+    pub tool: Tool,
+    pub cell: IVec2,
+}
+
+/// Costruisce la scena statica. Sta qui e non nell'editor perche' serve anche
+/// senza interfaccia: e' il modo in cui un impianto salvato torna in memoria.
+pub struct LayoutPlugin;
+
+impl Plugin for LayoutPlugin {
+    fn build(&self, app: &mut App) {
+        // In PostStartup perche' fra sistemi dello stesso schedule l'ordine non
+        // e' garantito, e la scena deve nascere dopo tutti i setup.
+        app.add_systems(PostStartup, load_layout_at_startup);
+    }
+}
+
+/// Unico punto in cui nasce un oggetto della scena: lo usano il clic
+/// dell'editor, il bottone Carica e l'avvio da riga di comando.
+pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2) {
+    let position = crate::grid::cell_center(cell).extend(1.0);
+    let object = match tool {
+        Tool::CarrierSource => crate::source::spawn_source(commands, position),
+        Tool::Gate => crate::gate::spawn_gate(commands, position),
+        Tool::Divert => crate::divert::spawn_divert(commands, position, DivertKind::Divert),
+        Tool::Atr => crate::divert::spawn_divert(commands, position, DivertKind::Atr),
+    };
+
+    commands.entity(object).insert(Placed { tool, cell });
+}
+
+pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
+    for object in &layout.objects {
+        place_in_cell(
+            commands,
+            object.tool,
+            IVec2::new(object.cell.0, object.cell.1),
+        );
+    }
+
+    info!("caricati {} oggetti", layout.objects.len());
+}
+
+/// Apre il layout passato sulla riga di comando. Un file che non si legge viene
+/// segnalato e basta: si parte a scena vuota, cosi' si puo' comunque costruirlo
+/// e salvarlo su quel nome.
+fn load_layout_at_startup(mut commands: Commands, layout_file: Res<LayoutFile>) {
+    info!("file di layout: {}", layout_file.path);
+
+    if !layout_file.load_at_startup {
+        return;
+    }
+
+    match load(&layout_file.path) {
+        Ok(layout) => spawn_layout(&mut commands, &layout),
+        Err(error) => error!("non riesco ad aprire {}: {error}", layout_file.path),
+    }
 }
 
 pub fn to_ron(layout: &Layout) -> Result<String, ron::Error> {

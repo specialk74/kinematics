@@ -1,6 +1,12 @@
+use std::time::Duration;
+
+use bevy::app::{ScheduleRunnerPlugin, TerminalCtrlCHandlerPlugin};
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
+use bevy::state::app::StatesPlugin;
 
 mod carrier;
+mod cli;
 mod divert;
 mod editor;
 mod gate;
@@ -9,26 +15,49 @@ mod layout;
 mod simulation;
 mod source;
 
-use carrier::CarrierPlugin;
-use divert::DivertPlugin;
+use carrier::{CarrierPlugin, CarrierVisualsPlugin};
+use cli::Options;
+use divert::DivertVisualsPlugin;
 use editor::{EditorPlugin, PALETTE_WIDTH};
-use gate::GatePlugin;
+use gate::GateVisualsPlugin;
 use grid::GridPlugin;
-use layout::LayoutFile;
-use simulation::SimulationPlugin;
-use source::SourcePlugin;
+use layout::LayoutPlugin;
+use simulation::{SimulationControlsPlugin, SimulationPlugin};
+use source::{SourcePlugin, SourceVisualsPlugin};
 
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
-/// Bordo sinistro dell'area di lavoro in coordinate mondo: piu' a sinistra c'e'
-/// la barra degli strumenti, dove non si piazza nulla e i carrier spariscono.
+/// Confini dell'area di lavoro in coordinate mondo. A sinistra si ferma dove
+/// inizia la barra degli strumenti; sugli altri lati coincide con la finestra.
+/// Sono costanti perche' la simulazione deve poterli usare anche senza camera.
 pub const WORK_AREA_LEFT: f32 = -(WIDTH as f32) / 2.0 + PALETTE_WIDTH;
+pub const WORK_AREA_RIGHT: f32 = WIDTH as f32 / 2.0;
+pub const WORK_AREA_TOP: f32 = HEIGTH as f32 / 2.0;
+pub const WORK_AREA_BOTTOM: f32 = -(HEIGTH as f32) / 2.0;
+
+/// Cadenza del passo headless. Senza finestra non c'e' un monitor a dare il
+/// ritmo: senza questa attesa il ciclo girerebbe a vuoto al massimo della CPU.
+const HEADLESS_STEP: Duration = Duration::from_micros(16_667);
 
 fn main() {
-    App::new()
-        // Primo argomento: il file di layout da aprire. Senza, si parte vuoti.
-        .insert_resource(LayoutFile::from_args(std::env::args().skip(1)))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let options = Options::from_args(std::env::args().skip(1));
+
+    let mut app = App::new();
+    app.insert_resource(options.layout);
+
+    // La simulazione e' la stessa nei due casi: cambia solo chi la guarda.
+    if options.hide_gui {
+        app.add_plugins((
+            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(HEADLESS_STEP)),
+            // Tre pezzi che stanno in DefaultPlugins ma non in MinimalPlugins:
+            // gli stati (li usa la pausa), il log e il gestore di Ctrl+C, senza
+            // il quale il processo verrebbe ucciso invece di uscire dal ciclo.
+            StatesPlugin,
+            LogPlugin::default(),
+            TerminalCtrlCHandlerPlugin,
+        ));
+    } else {
+        app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Carrier Flow".to_string(),
                 resolution: (WIDTH, HEIGTH).into(),
@@ -37,15 +66,18 @@ fn main() {
             ..Default::default()
         }))
         .add_plugins((
-            SimulationPlugin,
             GridPlugin,
-            CarrierPlugin,
-            SourcePlugin,
-            GatePlugin,
-            DivertPlugin,
             EditorPlugin,
+            SimulationControlsPlugin,
+            CarrierVisualsPlugin,
+            SourceVisualsPlugin,
+            GateVisualsPlugin,
+            DivertVisualsPlugin,
         ))
-        .add_systems(Startup, setup_camera)
+        .add_systems(Startup, setup_camera);
+    }
+
+    app.add_plugins((SimulationPlugin, LayoutPlugin, CarrierPlugin, SourcePlugin))
         .run();
 }
 

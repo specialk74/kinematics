@@ -11,11 +11,14 @@ pub struct Gate {
     pub active: bool,
 }
 
-pub struct GatePlugin;
+/// Il gate non ha sistemi propri: a bloccare i carrier ci pensa il loro
+/// movimento. Qui c'e' solo l'aspetto, quindi si monta solo con l'interfaccia.
+pub struct GateVisualsPlugin;
 
-impl Plugin for GatePlugin {
+impl Plugin for GateVisualsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_gate_assets);
+        app.add_systems(Startup, setup_gate_assets)
+            .add_systems(Update, (attach_gate_visuals, refresh_gate_colour));
     }
 }
 
@@ -54,31 +57,44 @@ pub fn shape(assets: &GateAssets) -> (Handle<Mesh>, Quat) {
 
 /// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
 /// resta visibile quando si accodano.
-pub fn spawn_gate(commands: &mut Commands, assets: &GateAssets, position: Vec3) -> Entity {
-    let (mesh, rotation) = shape(assets);
-
+pub fn spawn_gate(commands: &mut Commands, position: Vec3) -> Entity {
     commands
-        .spawn((
-            Mesh2d(mesh),
-            MeshMaterial2d(assets.active_material.clone()),
-            Transform::from_translation(position).with_rotation(rotation),
-            Gate { active: true },
-        ))
+        .spawn((Transform::from_translation(position), Gate { active: true }))
         .id()
 }
 
-/// Accende o spegne il gate, colore compreso.
-pub fn toggle_gate(
-    gate: &mut Gate,
-    material: &mut MeshMaterial2d<ColorMaterial>,
-    assets: &GateAssets,
-) {
-    gate.active = !gate.active;
-    material.0 = if gate.active {
+fn material_for(assets: &GateAssets, active: bool) -> Handle<ColorMaterial> {
+    if active {
         assets.active_material.clone()
     } else {
         assets.idle_material.clone()
-    };
+    }
+}
+
+fn attach_gate_visuals(
+    mut commands: Commands,
+    assets: Res<GateAssets>,
+    gates: Query<(Entity, &Gate), Without<Mesh2d>>,
+) {
+    let (mesh, _) = shape(&assets);
+
+    for (entity, gate) in gates.iter() {
+        commands.entity(entity).insert((
+            Mesh2d(mesh.clone()),
+            MeshMaterial2d(material_for(&assets, gate.active)),
+        ));
+    }
+}
+
+/// Il colore segue lo stato invece di essere aggiornato da chi lo cambia: chi
+/// accende o spegne un gate tocca solo `active` e non deve sapere nulla di mesh.
+fn refresh_gate_colour(
+    assets: Res<GateAssets>,
+    gates: Query<(&Gate, &mut MeshMaterial2d<ColorMaterial>), Changed<Gate>>,
+) {
+    for (gate, mut material) in gates {
+        material.0 = material_for(&assets, gate.active);
+    }
 }
 
 #[cfg(test)]
