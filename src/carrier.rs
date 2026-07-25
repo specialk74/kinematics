@@ -450,7 +450,7 @@ pub struct Moving<'a> {
 pub fn resolve_frame(
     belt: &[Moving],
     track: &Track,
-    active_gates: &[Vec3],
+    blockers: &[Vec3],
     delta_secs: f32,
 ) -> Vec<(Vec3, Option<Motion>)> {
     let steps: Vec<(Vec3, Motion)> = belt
@@ -477,12 +477,12 @@ pub fn resolve_frame(
                 gap < CARRIER_SIZE && gap < moving.position.distance(ahead.position)
             });
 
-            // Un gate attivo ferma il carrier subito prima di toccarlo. Chi lo
-            // stava gia' attraversando quando il gate e' stato attivato finisce
-            // il transito invece di restare incastrato dentro la sbarra.
-            let stopped = active_gates.iter().any(|gate| {
-                blocks_circle(*gate, candidate, CARRIER_RADIUS)
-                    && !blocks_circle(*gate, moving.position, CARRIER_RADIUS)
+            // Chi sbarra la strada ferma il carrier subito prima di toccarlo.
+            // Chi lo stava gia' attraversando quando la strada si e' chiusa
+            // finisce il transito invece di restare incastrato dentro l'ostacolo.
+            let stopped = blockers.iter().any(|blocker| {
+                blocks_circle(*blocker, candidate, CARRIER_RADIUS)
+                    && !blocks_circle(*blocker, moving.position, CARRIER_RADIUS)
             });
 
             if queued || stopped {
@@ -504,12 +504,6 @@ fn move_carrier(
 ) {
     let delta_secs = time.delta_secs();
 
-    let active_gates: Vec<Vec3> = gates
-        .iter()
-        .filter(|(gate, _)| gate.active)
-        .map(|(_, transform)| transform.translation)
-        .collect();
-
     let diverts: Vec<(&Divert, Heading, Vec3)> = diverts
         .iter()
         .map(|(divert, facing, transform)| (divert, facing.0, transform.translation))
@@ -528,6 +522,20 @@ fn move_carrier(
         reversers: &reversers,
     };
 
+    // Un gate acceso e un ATR spento fanno la stessa cosa al flusso: lo
+    // fermano. Per il movimento sono la stessa lista.
+    let blockers: Vec<Vec3> = gates
+        .iter()
+        .filter(|(gate, _)| gate.active)
+        .map(|(_, transform)| transform.translation)
+        .chain(
+            diverts
+                .iter()
+                .filter(|(divert, _, _)| divert.is_blocking())
+                .map(|(_, _, position)| *position),
+        )
+        .collect();
+
     let entities: Vec<Entity> = query.iter().map(|(entity, _, _)| entity).collect();
     let positions: Vec<Vec3> = query
         .iter()
@@ -542,7 +550,7 @@ fn move_carrier(
         })
         .collect();
 
-    let resolved = resolve_frame(&belt, &track, &active_gates, delta_secs);
+    let resolved = resolve_frame(&belt, &track, &blockers, delta_secs);
     drop(belt);
 
     for (entity, (translation, motion)) in entities.into_iter().zip(resolved) {
@@ -849,6 +857,81 @@ mod tests {
             end.x
         );
         assert!(end.y > 4.0 * GRID_STEP, "e deve aver continuato a salire");
+    }
+
+    /// Il caso dello screenshot: l'ATR viene spento mentre un carrier e' a meta'
+    /// manovra. Quel carrier deve finire di rientrare, non proseguire dritto
+    /// restando fra due corsie.
+    #[test]
+    fn a_carrier_caught_mid_manoeuvre_still_finishes_it() {
+        let off_atr = Divert {
+            kind: DivertKind::Atr,
+            active: false,
+        };
+        let atr_position = Vec3::ZERO;
+        let diverts = [(&off_atr, Heading::Up, atr_position)];
+        let track = only_diverts(&diverts);
+
+        let carrier = carrier(CarrierType::WithTube);
+        // Gia' dentro la manovra: mezza corsia sopra la linea di partenza.
+        let start = Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0);
+
+        let mut position = start;
+        for _ in 0..600 {
+            let resolved = {
+                let belt = [Moving {
+                    carrier: &carrier,
+                    position,
+                }];
+
+                resolve_frame(&belt, &track, &[atr_position], DELTA)
+            };
+            position = resolved[0].0;
+        }
+
+        assert!(
+            (position.y - LANE_HEIGHT).abs() < 0.01,
+            "doveva completare il rientro fino alla corsia, invece e' a y = {}",
+            position.y
+        );
+    }
+
+    /// Un ATR spento non apre una via dritta: il carrier gli si ferma davanti
+    /// invece di proseguire, e li' resta finche' non lo si riaccende.
+    #[test]
+    fn a_switched_off_atr_stops_the_flow() {
+        let empty_track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[],
+        };
+        let atr = Vec3::ZERO;
+
+        let carrier = carrier(CarrierType::WithTube);
+        let mut position = Vec3::new(3.0 * GRID_STEP, 0.0, 0.0);
+
+        for _ in 0..600 {
+            let resolved = {
+                let belt = [Moving {
+                    carrier: &carrier,
+                    position,
+                }];
+
+                resolve_frame(&belt, &empty_track, &[atr], DELTA)
+            };
+            position = resolved[0].0;
+        }
+
+        assert!(
+            position.x > 0.0,
+            "il carrier deve fermarsi davanti all'ATR, non attraversarlo: x = {}",
+            position.x
+        );
+        assert!(
+            position.x < CARRIER_SIZE,
+            "e deve arrivarci vicino, non fermarsi a meta' strada: x = {}",
+            position.x
+        );
     }
 
     /// Una fila di carrier deve attraversare la svolta senza incastrarsi: il

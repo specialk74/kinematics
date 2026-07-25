@@ -29,6 +29,14 @@ pub struct Divert {
 }
 
 impl Divert {
+    /// Cosa succede da spento e' l'unica differenza fra i due. Il divert lascia
+    /// proseguire il flusso: la via dritta esiste, semplicemente non viene
+    /// deviata. Dall'ATR invece non si passa, perche' quella via dritta non c'e':
+    /// spento non devia piu' e i carrier si fermano davanti.
+    pub fn is_blocking(&self) -> bool {
+        !self.active && self.kind == DivertKind::Atr
+    }
+
     /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
     ///
     /// La freccia disegnata e' la **diagonale** fra `facing` e la sua sinistra,
@@ -62,10 +70,6 @@ impl Divert {
         facing: Heading,
         heading: Heading,
     ) -> bool {
-        if !self.active {
-            return false;
-        }
-
         let Some(shift) = Divert::shift(facing, heading) else {
             return false;
         };
@@ -76,8 +80,21 @@ impl Divert {
         }
 
         let corridor = -DIVERT_LANE_TOLERANCE..=LANE_HEIGHT + DIVERT_LANE_TOLERANCE;
+        let offset = delta.dot(shift.as_vec());
+        if !corridor.contains(&offset) {
+            return false;
+        }
 
-        corridor.contains(&delta.dot(shift.as_vec()))
+        // Chi ha gia' lasciato la sua linea sta a meta' di una manovra, e la
+        // manovra va finita anche se nel frattempo il deviatore e' stato spento:
+        // abbandonarlo li' lo lascerebbe fra due corsie, fuori dalla griglia e
+        // fuori dalla portata di qualsiasi altro oggetto.
+        // Il limite superiore e' la destinazione esatta, non la destinazione
+        // meno la tolleranza: fermarsi prima lascerebbe il carrier appena fuori
+        // corsia, che e' lo stesso difetto in scala ridotta.
+        let under_way = (DIVERT_LANE_TOLERANCE..LANE_HEIGHT).contains(&offset);
+
+        self.active || under_way
     }
 }
 
@@ -259,5 +276,64 @@ mod tests {
         off.active = false;
 
         assert!(!off.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+    }
+
+    /// Spegnere un ATR non apre una via dritta, perche' quella via non esiste:
+    /// smette di deviare e comincia a sbarrare.
+    #[test]
+    fn a_switched_off_atr_bars_the_way_instead_of_opening_it() {
+        let mut atr = Divert {
+            kind: DivertKind::Atr,
+            active: false,
+        };
+
+        assert!(atr.is_blocking(), "da spento l'ATR sbarra");
+        assert!(
+            !atr.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left),
+            "e quindi non devia piu'"
+        );
+
+        atr.active = true;
+        assert!(!atr.is_blocking(), "acceso torna a essere un passaggio");
+        assert!(atr.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+    }
+
+    /// Il divert spento e' invece trasparente: la via dritta c'e' e resta aperta.
+    #[test]
+    fn a_switched_off_divert_is_transparent() {
+        let mut off = divert();
+        off.active = false;
+
+        assert!(!off.is_blocking());
+    }
+
+    /// Spegnere un deviatore mentre un carrier e' a meta' manovra non lo
+    /// abbandona fra due corsie: quella manovra la finisce comunque.
+    #[test]
+    fn a_manoeuvre_already_begun_is_finished_anyway() {
+        let mut off = Divert {
+            kind: DivertKind::Atr,
+            active: false,
+        };
+        let position = Vec3::ZERO;
+        let arrow = Heading::Up;
+        let flow = Heading::Left;
+
+        let halfway = Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0);
+        assert!(
+            off.catches(position, halfway, arrow, flow),
+            "a meta' strada la manovra prosegue"
+        );
+
+        let just_arriving = Vec3::new(0.0, 0.0, 0.0);
+        assert!(
+            !off.catches(position, just_arriving, arrow, flow),
+            "chi deve ancora cominciare non parte nemmeno"
+        );
+
+        // E lo stesso vale per il divert: la differenza fra i due e' cosa
+        // succede a chi arriva, non a chi e' gia' dentro.
+        off.kind = DivertKind::Divert;
+        assert!(off.catches(position, halfway, arrow, flow));
     }
 }
