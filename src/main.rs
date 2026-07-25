@@ -7,6 +7,8 @@ pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
 pub const CARRIER_RADIUS: f32 = 15.0;
 pub const CARRIER_THICKNESS: f32 = 3.0;
 pub const CARRIER_SIZE: f32 = CARRIER_RADIUS * 2.0 + 4.0;
+pub const GATE_WIDTH: f32 = 8.0;
+pub const GATE_HEIGHT: f32 = 44.0;
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
 
@@ -31,6 +33,14 @@ pub enum DivertType {
 #[derive(Component)]
 struct Divert(DivertType);
 
+/// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
+/// quando e' spenta li lascia passare. Se e' fuori dal flusso non blocca nessuno,
+/// perche' il controllo e' puramente geometrico.
+#[derive(Component)]
+struct Gate {
+    active: bool,
+}
+
 fn main() {
     App::new()
         .init_resource::<CarrierSpawnTimer>()
@@ -47,6 +57,7 @@ fn main() {
         .add_systems(Update, tick_carrier_spawn_timer)
         .add_systems(Update, spawn_carrier)
         .add_systems(Update, despawn_offscreen)
+        .add_systems(Update, place_gate)
         .run();
 }
 
@@ -60,12 +71,25 @@ struct CarrierAssets {
     with_tube_material: Handle<ColorMaterial>,
 }
 
+#[derive(Resource)]
+struct GateAssets {
+    mesh: Handle<Mesh>,
+    active_material: Handle<ColorMaterial>,
+    idle_material: Handle<ColorMaterial>,
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     commands.spawn(Camera2d);
+
+    commands.insert_resource(GateAssets {
+        mesh: meshes.add(Rectangle::new(GATE_WIDTH, GATE_HEIGHT)),
+        active_material: materials.add(Color::srgb(0.9, 0.1, 0.1)),
+        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+    });
 
     commands.insert_resource(CarrierAssets {
         // Il carrier vuoto e' un anello: cerchio senza riempimento.
@@ -150,6 +174,60 @@ fn spawn_carrier(
     }
 }
 
+/// Click sinistro: piazza un gate attivo sotto al mouse. Se il click cade su un
+/// gate gia' esistente ne commuta lo stato, cosi' si puo' aprire e chiudere il
+/// flusso restando sullo stesso pulsante.
+fn place_gate(
+    mut commands: Commands,
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut gates: Query<(&mut Gate, &Transform, &mut MeshMaterial2d<ColorMaterial>)>,
+    gate_assets: Res<GateAssets>,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+    let Ok(position) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+        return;
+    };
+
+    for (mut gate, transform, mut material) in gates.iter_mut() {
+        let half_gate = Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0;
+        if (position - transform.translation.truncate())
+            .abs()
+            .cmple(half_gate)
+            .all()
+        {
+            gate.active = !gate.active;
+            material.0 = if gate.active {
+                gate_assets.active_material.clone()
+            } else {
+                gate_assets.idle_material.clone()
+            };
+            return;
+        }
+    }
+
+    commands.spawn((
+        Mesh2d(gate_assets.mesh.clone()),
+        MeshMaterial2d(gate_assets.active_material.clone()),
+        // z davanti ai carrier, cosi' la sbarra resta visibile quando si accodano.
+        Transform::from_translation(position.extend(1.0)),
+        Gate { active: true },
+    ));
+}
+
 fn carrier_velocity(carrier: &Carrier, translation: Vec3) -> Vec3 {
     if carrier.0 == CarrierType::WithTube {
         let pos = translation.x.abs();
@@ -165,8 +243,26 @@ fn carrier_velocity(carrier: &Carrier, translation: Vec3) -> Vec3 {
     }
 }
 
-fn move_carrier(time: Res<Time>, mut query: Query<(Entity, &Carrier, &mut Transform)>) {
+/// Il carrier e' un cerchio, il gate un rettangolo: si misura la distanza dal
+/// punto del rettangolo piu' vicino al centro del carrier.
+fn carrier_touches_gate(carrier: Vec3, gate: Vec3) -> bool {
+    let half_gate = Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0;
+    let distance = (carrier.truncate() - gate.truncate()).abs() - half_gate;
+    distance.max(Vec2::ZERO).length() < CARRIER_RADIUS
+}
+
+fn move_carrier(
+    time: Res<Time>,
+    mut query: Query<(Entity, &Carrier, &mut Transform)>,
+    gates: Query<(&Gate, &Transform), Without<Carrier>>,
+) {
     let delta_secs = time.delta_secs();
+
+    let active_gates: Vec<Vec3> = gates
+        .iter()
+        .filter(|(gate, _)| gate.active)
+        .map(|(_, transform)| transform.translation)
+        .collect();
 
     // Si risolve un carrier alla volta partendo da quello piu' avanti sul nastro:
     // chi si ferma deve bloccare a cascata tutti quelli che ha dietro.
@@ -191,7 +287,13 @@ fn move_carrier(time: Res<Time>, mut query: Query<(Entity, &Carrier, &mut Transf
         let blocked = resolved.iter().any(|(_, ahead)| {
             let gap = candidate.distance(*ahead);
             gap < CARRIER_SIZE && gap < translation.distance(*ahead)
-        });
+        })
+        // Un gate attivo ferma il carrier subito prima di toccarlo. Chi lo stava
+        // gia' attraversando quando il gate e' stato attivato finisce il transito
+        // invece di restare incastrato dentro la sbarra.
+            || active_gates.iter().any(|gate| {
+                carrier_touches_gate(candidate, *gate) && !carrier_touches_gate(translation, *gate)
+            });
         resolved.push((entity, if blocked { translation } else { candidate }));
     }
 
@@ -199,6 +301,33 @@ fn move_carrier(time: Res<Time>, mut query: Query<(Entity, &Carrier, &mut Transf
         if let Ok((_, _, mut transform)) = query.get_mut(entity) {
             transform.translation = translation;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_blocks_only_what_passes_through_it() {
+        let on_belt = Vec3::new(0.0, 0.0, 1.0);
+        let off_belt = Vec3::new(0.0, 200.0, 1.0);
+        let carrier_far = Vec3::new(40.0, 0.0, 0.0);
+        let carrier_close = Vec3::new(17.0, 0.0, 0.0);
+
+        assert!(
+            !carrier_touches_gate(carrier_far, on_belt),
+            "carrier ancora lontano dal gate: deve passare"
+        );
+        assert!(
+            carrier_touches_gate(carrier_close, on_belt),
+            "carrier arrivato sul gate: deve essere fermato"
+        );
+        assert!(
+            !carrier_touches_gate(carrier_close, off_belt),
+            "gate fuori dal flusso: non deve bloccare nessuno"
+        );
+        assert!(!carrier_touches_gate(carrier_far, off_belt));
     }
 }
 
