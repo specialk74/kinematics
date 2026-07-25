@@ -15,6 +15,9 @@ pub enum SimulationState {
     #[default]
     Running,
     Paused,
+    /// Sta rigiocando una registrazione: le posizioni arrivano dal file, non
+    /// dal movimento, quindi la simulazione vera deve stare ferma.
+    Replaying,
 }
 
 #[derive(Component)]
@@ -104,7 +107,9 @@ fn toggle_simulation(
         if *interaction == Interaction::Pressed {
             next_state.set(match state.get() {
                 SimulationState::Running => SimulationState::Paused,
-                SimulationState::Paused => SimulationState::Running,
+                // Durante una riproduzione il tasto rimette in moto la
+                // simulazione vera, interrompendola.
+                SimulationState::Paused | SimulationState::Replaying => SimulationState::Running,
             });
         }
     }

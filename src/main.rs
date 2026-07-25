@@ -17,10 +17,10 @@ mod geometry;
 mod grid;
 mod layout;
 mod piece;
-mod recorder;
 mod reverser;
 mod simulation;
 mod source;
+mod trace;
 mod turner;
 
 use camera::CameraPlugin;
@@ -33,10 +33,10 @@ use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
 use piece::PiecePlugin;
-use recorder::{RecorderPlugin, Recording};
 use reverser::ReverserVisualsPlugin;
-use simulation::{SimulationControlsPlugin, SimulationPlugin};
+use simulation::{SimulationControlsPlugin, SimulationPlugin, SimulationState};
 use source::{SourcePlugin, SourceVisualsPlugin};
+use trace::{Replay, TracePlugin};
 use turner::TurnerVisualsPlugin;
 
 pub const WIDTH: u32 = 1024;
@@ -52,10 +52,6 @@ fn main() {
 
     let mut app = App::new();
     app.insert_resource(options.layout_file());
-
-    if options.record && options.hide_gui {
-        warn!("--record richiede l'interfaccia: senza finestra non c'e' niente da riprendere");
-    }
 
     // La simulazione e' la stessa nei due casi: cambia solo chi la guarda.
     if options.hide_gui {
@@ -87,18 +83,27 @@ fn main() {
             SourceVisualsPlugin,
             GateVisualsPlugin,
             DivertVisualsPlugin,
-            RecorderPlugin,
+            TracePlugin,
             DespawnerVisualsPlugin,
             TurnerVisualsPlugin,
             ReverserVisualsPlugin,
         ));
     }
 
-    if options.record && !options.hide_gui {
-        // In PostStartup perche' la risorsa nasce nello Startup del suo plugin.
-        app.add_systems(PostStartup, |mut recording: ResMut<Recording>| {
-            recording.start()
-        });
+    // Registrazione e riproduzione partono a scena gia' costruita: il layout
+    // nasce in PostStartup, e una riproduzione porta con se' il proprio.
+    if options.record {
+        app.add_systems(PostStartup, trace::start_recording);
+    }
+    if let Some(path) = options.replay.clone() {
+        app.add_systems(
+            PostStartup,
+            move |mut commands: Commands,
+                  mut replay: ResMut<Replay>,
+                  mut next_state: ResMut<NextState<SimulationState>>| {
+                trace::play_from_file(&mut commands, &mut replay, &mut next_state, &path);
+            },
+        );
     }
 
     app.add_plugins((

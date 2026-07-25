@@ -20,7 +20,7 @@ pub const CARRIER_SIZE: f32 = CARRIER_RADIUS * 2.0 + 4.0;
 /// Lunghezza massima di un identificativo di campione.
 pub const SAMPLE_ID_MAX_LEN: usize = 24;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum CarrierType {
     Empty,
     WithTube,
@@ -282,7 +282,6 @@ fn carrier_label(carrier: &Carrier) -> impl Bundle {
 }
 
 /// Immette un carrier nel flusso; il tipo (vuoto o con tubo) e' casuale 50-50.
-/// Il campione lo ha solo chi porta un tubo: e' il tubo il campione.
 pub fn spawn_random_carrier(
     commands: &mut Commands,
     position: Vec3,
@@ -290,30 +289,45 @@ pub fn spawn_random_carrier(
     ids: &mut NextCarrierId,
 ) {
     let mut rng = rand::rng();
-    let carrier_id = ids.take();
-
-    if rng.random::<u32>() > u32::MAX / 2 {
-        commands.spawn((
-            Transform::from_translation(position),
-            Carrier {
-                kind: CarrierType::WithTube,
-                carrier_id,
-                sample_id: placeholder_sample_id(carrier_id),
-                motion: Motion::Straight(heading),
-            },
-            children![Tube],
-        ));
+    let kind = if rng.random::<u32>() > u32::MAX / 2 {
+        CarrierType::WithTube
     } else {
-        commands.spawn((
-            Transform::from_translation(position),
-            Carrier {
-                kind: CarrierType::Empty,
-                carrier_id,
-                sample_id: None,
-                motion: Motion::Straight(heading),
-            },
-        ));
+        CarrierType::Empty
+    };
+
+    spawn_carrier(commands, position, kind, ids.take(), heading);
+}
+
+/// Crea un carrier con identita' assegnata. La riproduzione di una registrazione
+/// passa di qui: i carrier devono tornare con lo stesso numero, non con uno nuovo.
+/// Il campione lo ha solo chi porta un tubo: e' il tubo il campione.
+pub fn spawn_carrier(
+    commands: &mut Commands,
+    position: Vec3,
+    kind: CarrierType,
+    carrier_id: u32,
+    heading: Heading,
+) -> Entity {
+    let with_tube = kind == CarrierType::WithTube;
+    let sample_id = with_tube
+        .then(|| placeholder_sample_id(carrier_id))
+        .flatten();
+
+    let mut carrier = commands.spawn((
+        Transform::from_translation(position),
+        Carrier {
+            kind,
+            carrier_id,
+            sample_id,
+            motion: Motion::Straight(heading),
+        },
+    ));
+
+    if with_tube {
+        carrier.with_child(Tube);
     }
+
+    carrier.id()
 }
 
 /// Segnaposto in attesa che i campioni arrivino da fuori: e' derivato dal

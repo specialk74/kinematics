@@ -12,10 +12,14 @@ pub struct Options {
     #[arg(short, long, value_name = "FILE")]
     layout: Option<String>,
 
-    /// Avvia subito la registrazione del filmato. Richiede l'interfaccia:
-    /// senza finestra non c'e' niente da riprendere.
+    /// Comincia subito a registrare le posizioni dei carrier.
     #[arg(long)]
     pub record: bool,
+
+    /// Riproduce una registrazione invece di simulare. Il file porta con se'
+    /// anche l'impianto, quindi non serve indicare un layout.
+    #[arg(long, value_name = "FILE")]
+    pub replay: Option<String>,
 
     /// Fa girare la simulazione senza finestra, fino a Ctrl+C.
     // Il nome con trattino basso e' quello richiesto; clap lo trasformerebbe in
@@ -43,6 +47,14 @@ mod tests {
     fn recording_can_be_asked_for_from_the_start() {
         assert!(parse(&["--record"]).record);
         assert!(!parse(&[]).record, "di norma non si registra");
+    }
+
+    #[test]
+    fn a_recording_can_be_replayed_from_the_start() {
+        let options = parse(&["--replay", "registrazione-1.ron"]);
+
+        assert_eq!(options.replay.as_deref(), Some("registrazione-1.ron"));
+        assert_eq!(parse(&[]).replay, None);
     }
 
     #[test]

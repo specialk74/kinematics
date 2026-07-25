@@ -107,6 +107,21 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: F
         .insert((Placed { tool, cell }, facing));
 }
 
+/// Raccoglie in un `Layout` gli oggetti attualmente in scena. Lo usano il
+/// bottone Salva e la registrazione, che porta con se' l'impianto.
+pub fn collect(placed: &Query<(&Placed, &Facing)>) -> Layout {
+    Layout {
+        objects: placed
+            .iter()
+            .map(|(placed, facing)| LayoutObject {
+                tool: placed.tool,
+                cell: (placed.cell.x, placed.cell.y),
+                facing: *facing,
+            })
+            .collect(),
+    }
+}
+
 pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
     for object in &layout.objects {
         place_in_cell(

@@ -7,7 +7,7 @@ use crate::carrier::Carrier;
 use crate::divert::Divert;
 use crate::gate::Gate;
 use crate::grid;
-use crate::layout::{self, Layout, LayoutFile, LayoutObject, Placed, place_in_cell, spawn_layout};
+use crate::layout::{self, LayoutFile, Placed, place_in_cell, spawn_layout};
 use crate::piece::{self, Facing, PieceShapes};
 use crate::reverser::Reverser;
 use crate::source::CarrierSource;
@@ -670,7 +670,8 @@ fn drag_piece(
 fn handle_layout_buttons(
     mut commands: Commands,
     buttons: Query<(&Interaction, &LayoutButton), Changed<Interaction>>,
-    placed: Query<(Entity, &Placed, &Facing)>,
+    placed: Query<(Entity, &Placed)>,
+    pieces: Query<(&Placed, &Facing)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
     mut notice: ResMut<SaveNotice>,
@@ -682,16 +683,7 @@ fn handle_layout_buttons(
 
         match button.0 {
             LayoutAction::Save => {
-                let layout = Layout {
-                    objects: placed
-                        .iter()
-                        .map(|(_, placed, facing)| LayoutObject {
-                            tool: placed.tool,
-                            cell: (placed.cell.x, placed.cell.y),
-                            facing: *facing,
-                        })
-                        .collect(),
-                };
+                let layout = layout::collect(&pieces);
 
                 let saved = match layout::save(&layout, &layout_file.path) {
                     Ok(()) => {
@@ -709,7 +701,7 @@ fn handle_layout_buttons(
 
             LayoutAction::Load => match layout::load(&layout_file.path) {
                 Ok(layout) => {
-                    for (entity, _, _) in placed.iter() {
+                    for (entity, _) in placed.iter() {
                         commands.entity(entity).despawn();
                     }
                     for entity in carriers.iter() {
