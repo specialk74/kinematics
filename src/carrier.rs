@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::text::TextBounds;
 use rand::prelude::*;
 
 use crate::divert::Divert;
@@ -13,17 +14,62 @@ pub const CARRIER_THICKNESS: f32 = 3.0;
 /// Distanza minima fra i centri di due carrier: diametro piu' un po' di margine.
 pub const CARRIER_SIZE: f32 = CARRIER_RADIUS * 2.0 + 4.0;
 
+/// Lunghezza massima di un identificativo di campione.
+pub const SAMPLE_ID_MAX_LEN: usize = 24;
+
 #[derive(PartialEq)]
 pub enum CarrierType {
     Empty,
     WithTube,
 }
 
+/// Identificativo del campione trasportato. Il limite di 24 caratteri sta nel
+/// costruttore invece che in un commento: un valore piu' lungo non puo' esistere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SampleId(String);
+
+impl SampleId {
+    pub fn new(text: &str) -> Option<Self> {
+        // Si contano i caratteri, non i byte: un accento occupa due byte ma
+        // resta un carattere solo.
+        let length = text.chars().count();
+
+        (1..=SAMPLE_ID_MAX_LEN)
+            .contains(&length)
+            .then(|| SampleId(text.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Il carrier non sa niente del percorso: sono i deviatori che incontra a dirgli
-/// dove andare.
+/// dove andare. Porta pero' la propria identita', che serve anche senza interfaccia.
 #[derive(Component)]
 pub struct Carrier {
     pub kind: CarrierType,
+    pub carrier_id: u32,
+    /// Uno e uno solo, quando c'e'.
+    pub sample_id: Option<SampleId>,
+}
+
+/// Contatore progressivo dei carrier. Riparte da 1 a ogni avvio.
+#[derive(Resource)]
+pub struct NextCarrierId(u32);
+
+impl Default for NextCarrierId {
+    fn default() -> Self {
+        NextCarrierId(1)
+    }
+}
+
+impl NextCarrierId {
+    fn take(&mut self) -> u32 {
+        let id = self.0;
+        self.0 = self.0.wrapping_add(1);
+        id
+    }
 }
 
 #[derive(Component)]
@@ -35,7 +81,7 @@ pub struct CarrierPlugin;
 
 impl Plugin for CarrierPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<NextCarrierId>().add_systems(
             Update,
             (move_carrier, despawn_offscreen).run_if(in_state(SimulationState::Running)),
         );
@@ -79,6 +125,15 @@ fn setup_carrier_assets(
     });
 }
 
+/// Il testo viene rasterizzato a questa dimensione e poi rimpicciolito dalla
+/// scala: se lo si disegnasse gia' a 3 px, zoomando resterebbe una macchia
+/// sfocata, perche' lo zoom ingrandisce i pixel gia' prodotti. Cosi' invece la
+/// nitidezza c'e' fino a un ingrandimento di 1/LABEL_SCALE.
+const LABEL_FONT_SIZE: f32 = 32.0;
+const LABEL_SCALE: f32 = 0.11;
+/// Lato del quadrato inscritto nel cerchio: il testo non ne esce mai.
+const LABEL_BOX: f32 = CARRIER_RADIUS * std::f32::consts::SQRT_2;
+
 /// Da' un corpo ai carrier appena nati. Senza questo sistema esistono lo stesso e
 /// si muovono: semplicemente non li vede nessuno.
 fn attach_carrier_visuals(
@@ -97,19 +152,48 @@ fn attach_carrier_visuals(
 
         commands
             .entity(entity)
-            .insert((Mesh2d(mesh), MeshMaterial2d(material)));
+            .insert((Mesh2d(mesh), MeshMaterial2d(material)))
+            .with_child(carrier_label(carrier));
     }
 }
 
+/// Etichetta dentro al cerchio: carrier_id sulla prima riga, sample_id sotto se
+/// c'e'. Va a capo su qualsiasi carattere, perche' un sample_id non ha spazi in
+/// cui spezzarsi.
+fn carrier_label(carrier: &Carrier) -> impl Bundle {
+    let mut text = carrier.carrier_id.to_string();
+    if let Some(sample_id) = &carrier.sample_id {
+        text.push('\n');
+        text.push_str(sample_id.as_str());
+    }
+
+    (
+        Text2d::new(text),
+        TextFont {
+            font_size: LABEL_FONT_SIZE,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        TextLayout::new(Justify::Center, LineBreak::AnyCharacter),
+        // I limiti sono nello spazio del testo, quindi prima della riduzione.
+        TextBounds::new(LABEL_BOX / LABEL_SCALE, LABEL_BOX / LABEL_SCALE),
+        Transform::from_xyz(0.0, 0.0, 0.1).with_scale(Vec3::splat(LABEL_SCALE)),
+    )
+}
+
 /// Immette un carrier nel flusso; il tipo (vuoto o con tubo) e' casuale 50-50.
-pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3) {
+/// Il campione lo ha solo chi porta un tubo: e' il tubo il campione.
+pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut NextCarrierId) {
     let mut rng = rand::rng();
+    let carrier_id = ids.take();
 
     if rng.random::<u32>() > u32::MAX / 2 {
         commands.spawn((
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::WithTube,
+                carrier_id,
+                sample_id: placeholder_sample_id(carrier_id),
             },
             children![Tube],
         ));
@@ -118,9 +202,17 @@ pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3) {
             Transform::from_translation(position),
             Carrier {
                 kind: CarrierType::Empty,
+                carrier_id,
+                sample_id: None,
             },
         ));
     }
+}
+
+/// Segnaposto in attesa che i campioni arrivino da fuori: e' derivato dal
+/// carrier_id solo per avere qualcosa di stabile da guardare a schermo.
+fn placeholder_sample_id(carrier_id: u32) -> Option<SampleId> {
+    SampleId::new(&format!("SMP-{carrier_id:08}"))
 }
 
 /// Spostamento di un carrier in questo frame. Solo i carrier con tubo vengono
@@ -238,7 +330,11 @@ mod tests {
     }
 
     fn carrier(kind: CarrierType) -> Carrier {
-        Carrier { kind }
+        Carrier {
+            kind,
+            carrier_id: 1,
+            sample_id: None,
+        }
     }
 
     /// Il caso completo: divert sulla corsia principale, ATR una cella piu' su.
@@ -337,6 +433,44 @@ mod tests {
                 position.x
             );
         }
+    }
+
+    #[test]
+    fn the_counter_hands_out_one_id_per_carrier() {
+        let mut ids = NextCarrierId::default();
+
+        assert_eq!(ids.take(), 1, "si parte da 1, non da 0");
+        assert_eq!(ids.take(), 2);
+        assert_eq!(ids.take(), 3);
+    }
+
+    #[test]
+    fn a_sample_id_longer_than_the_limit_cannot_exist() {
+        let limit = "x".repeat(SAMPLE_ID_MAX_LEN);
+        let too_long = "x".repeat(SAMPLE_ID_MAX_LEN + 1);
+
+        assert!(SampleId::new(&limit).is_some(), "24 caratteri sono ammessi");
+        assert!(SampleId::new(&too_long).is_none());
+        assert!(SampleId::new("").is_none(), "un id vuoto e' assenza di id");
+    }
+
+    /// Il limite e' sui caratteri: contare i byte scarterebbe id legittimi.
+    #[test]
+    fn accented_characters_count_as_one() {
+        let accented = "à".repeat(SAMPLE_ID_MAX_LEN);
+
+        assert_eq!(accented.len(), SAMPLE_ID_MAX_LEN * 2, "sono 48 byte");
+        assert!(SampleId::new(&accented).is_some());
+    }
+
+    #[test]
+    fn only_carriers_with_a_tube_carry_a_sample() {
+        assert!(placeholder_sample_id(42).is_some());
+        assert_eq!(
+            placeholder_sample_id(42).unwrap().as_str(),
+            "SMP-00000042",
+            "sta comodamente nei 24 caratteri"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
 
-use crate::carrier::{CARRIER_SIZE, Carrier, spawn_random_carrier};
+use crate::carrier::{CARRIER_SIZE, Carrier, NextCarrierId, spawn_random_carrier};
 use crate::simulation::SimulationState;
 
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
@@ -93,6 +93,7 @@ fn spawn_from_sources(
     time: Res<Time>,
     mut sources: Query<(&mut CarrierSource, &Transform)>,
     carriers: Query<&Transform, With<Carrier>>,
+    mut ids: ResMut<NextCarrierId>,
 ) {
     for (mut source, transform) in sources.iter_mut() {
         source.timer.tick(time.delta());
@@ -111,6 +112,6 @@ fn spawn_from_sources(
             continue;
         }
 
-        spawn_random_carrier(&mut commands, position);
+        spawn_random_carrier(&mut commands, position, &mut ids);
     }
 }

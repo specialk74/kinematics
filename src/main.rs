@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use clap::Parser;
 
+mod camera;
 mod carrier;
 mod cli;
 mod divert;
@@ -16,6 +17,7 @@ mod layout;
 mod simulation;
 mod source;
 
+use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
 use cli::Options;
 use divert::DivertVisualsPlugin;
@@ -68,6 +70,7 @@ fn main() {
             ..Default::default()
         }))
         .add_plugins((
+            CameraPlugin,
             GridPlugin,
             EditorPlugin,
             SimulationControlsPlugin,
@@ -75,14 +78,9 @@ fn main() {
             SourceVisualsPlugin,
             GateVisualsPlugin,
             DivertVisualsPlugin,
-        ))
-        .add_systems(Startup, setup_camera);
+        ));
     }
 
     app.add_plugins((SimulationPlugin, LayoutPlugin, CarrierPlugin, SourcePlugin))
         .run();
-}
-
-fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
 }
