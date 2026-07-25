@@ -16,8 +16,10 @@ mod gate;
 mod geometry;
 mod grid;
 mod layout;
+mod reverser;
 mod simulation;
 mod source;
+mod turner;
 
 use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
@@ -28,8 +30,10 @@ use editor::EditorPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
+use reverser::ReverserVisualsPlugin;
 use simulation::{SimulationControlsPlugin, SimulationPlugin};
 use source::{SourcePlugin, SourceVisualsPlugin};
+use turner::TurnerVisualsPlugin;
 
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
@@ -75,6 +79,8 @@ fn main() {
             GateVisualsPlugin,
             DivertVisualsPlugin,
             DespawnerVisualsPlugin,
+            TurnerVisualsPlugin,
+            ReverserVisualsPlugin,
         ));
     }
 

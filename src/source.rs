@@ -13,6 +13,7 @@ pub const SOURCE_SIZE: f32 = 34.0;
 #[derive(Component)]
 pub struct CarrierSource {
     timer: Timer,
+    pub active: bool,
 }
 
 pub struct SourcePlugin;
@@ -33,14 +34,15 @@ pub struct SourceVisualsPlugin;
 impl Plugin for SourceVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_source_assets)
-            .add_systems(Update, attach_source_visuals);
+            .add_systems(Update, (attach_source_visuals, refresh_source_colour));
     }
 }
 
 #[derive(Resource)]
 pub struct SourceAssets {
     mesh: Handle<Mesh>,
-    material: Handle<ColorMaterial>,
+    active_material: Handle<ColorMaterial>,
+    idle_material: Handle<ColorMaterial>,
 }
 
 fn setup_source_assets(
@@ -50,7 +52,8 @@ fn setup_source_assets(
 ) {
     commands.insert_resource(SourceAssets {
         mesh: meshes.add(RegularPolygon::new(SOURCE_SIZE / 2.0, 3)),
-        material: materials.add(Color::srgb(0.2, 0.5, 1.0)),
+        active_material: materials.add(Color::srgb(0.2, 0.5, 1.0)),
+        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
 }
 
@@ -61,19 +64,36 @@ pub fn shape(assets: &SourceAssets) -> (Handle<Mesh>, Quat) {
     (assets.mesh.clone(), Quat::from_rotation_z(FRAC_PI_2))
 }
 
+fn material_for(assets: &SourceAssets, active: bool) -> Handle<ColorMaterial> {
+    if active {
+        assets.active_material.clone()
+    } else {
+        assets.idle_material.clone()
+    }
+}
+
 fn attach_source_visuals(
     mut commands: Commands,
     assets: Res<SourceAssets>,
-    sources: Query<(Entity, &mut Transform), (With<CarrierSource>, Without<Mesh2d>)>,
+    sources: Query<(Entity, &CarrierSource, &mut Transform), Without<Mesh2d>>,
 ) {
     let (mesh, rotation) = shape(&assets);
 
-    for (entity, mut transform) in sources {
+    for (entity, source, mut transform) in sources {
         transform.rotation = rotation;
         commands.entity(entity).insert((
             Mesh2d(mesh.clone()),
-            MeshMaterial2d(assets.material.clone()),
+            MeshMaterial2d(material_for(&assets, source.active)),
         ));
+    }
+}
+
+fn refresh_source_colour(
+    assets: Res<SourceAssets>,
+    sources: Query<(&CarrierSource, &mut MeshMaterial2d<ColorMaterial>), Changed<CarrierSource>>,
+) {
+    for (source, mut material) in sources {
+        material.0 = material_for(&assets, source.active);
     }
 }
 
@@ -83,6 +103,7 @@ pub fn spawn_source(commands: &mut Commands, position: Vec3) -> Entity {
             Transform::from_translation(position),
             CarrierSource {
                 timer: Timer::from_seconds(CARRIER_SPAWN_TIME, TimerMode::Repeating),
+                active: true,
             },
         ))
         .id()
@@ -96,6 +117,12 @@ fn spawn_from_sources(
     mut ids: ResMut<NextCarrierId>,
 ) {
     for (mut source, transform) in sources.iter_mut() {
+        // Da spenta non emette e non conta nemmeno il tempo: riaccesa riparte
+        // da dov'era, invece di recuperare l'attesa in un colpo solo.
+        if !source.active {
+            continue;
+        }
+
         source.timer.tick(time.delta());
         if !source.timer.is_finished() {
             continue;

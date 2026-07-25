@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::carrier::Sense;
 use crate::divert::DivertKind;
 use crate::editor::Tool;
 
@@ -93,6 +94,13 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2) {
         Tool::Divert => crate::divert::spawn_divert(commands, position, DivertKind::Divert),
         Tool::Atr => crate::divert::spawn_divert(commands, position, DivertKind::Atr),
         Tool::Despawner => crate::despawner::spawn_despawner(commands, position),
+        Tool::Turner => crate::turner::spawn_turner(commands, position),
+        Tool::Reverser => {
+            crate::reverser::spawn_reverser(commands, position, Sense::CounterClockwise)
+        }
+        Tool::ReverserClockwise => {
+            crate::reverser::spawn_reverser(commands, position, Sense::Clockwise)
+        }
     };
 
     commands.entity(object).insert(Placed { tool, cell });

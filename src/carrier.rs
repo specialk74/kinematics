@@ -4,7 +4,9 @@ use rand::prelude::*;
 
 use crate::divert::Divert;
 use crate::gate::{Gate, blocks_circle};
+use crate::reverser::{Reverser, TURN_RADIUS};
 use crate::simulation::SimulationState;
+use crate::turner::Turner;
 
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
@@ -43,7 +45,121 @@ impl SampleId {
     }
 }
 
-/// Il carrier non sa niente del percorso: sono i deviatori che incontra a dirgli
+/// Verso di marcia lungo gli assi della griglia.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Heading {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Heading {
+    pub fn as_vec(self) -> Vec2 {
+        match self {
+            Heading::Left => Vec2::NEG_X,
+            Heading::Right => Vec2::X,
+            Heading::Up => Vec2::Y,
+            Heading::Down => Vec2::NEG_Y,
+        }
+    }
+
+    /// La destra di chi marcia, non la destra dello schermo: chi va a sinistra
+    /// svolta verso l'alto, chi sale svolta verso destra.
+    pub fn turn_right(self) -> Self {
+        match self {
+            Heading::Left => Heading::Up,
+            Heading::Up => Heading::Right,
+            Heading::Right => Heading::Down,
+            Heading::Down => Heading::Left,
+        }
+    }
+
+    pub fn opposite(self) -> Self {
+        match self {
+            Heading::Left => Heading::Right,
+            Heading::Right => Heading::Left,
+            Heading::Up => Heading::Down,
+            Heading::Down => Heading::Up,
+        }
+    }
+}
+
+/// Verso di rotazione di una curva. Non dipende dagli assi ma dalla marcia del
+/// carrier: e' quello che permette alla stessa inversione di funzionare sia su
+/// un flusso orizzontale sia su uno verticale.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sense {
+    CounterClockwise,
+    Clockwise,
+}
+
+impl Sense {
+    /// Da che parte sta il centro della curva rispetto alla marcia: alla
+    /// sinistra del carrier se antiorario, alla sua destra se orario.
+    pub fn centre_side(self, heading: Heading) -> Vec2 {
+        let along = heading.as_vec();
+
+        match self {
+            Sense::CounterClockwise => Vec2::new(-along.y, along.x),
+            Sense::Clockwise => Vec2::new(along.y, -along.x),
+        }
+    }
+
+    fn sign(self) -> f32 {
+        match self {
+            Sense::CounterClockwise => 1.0,
+            Sense::Clockwise => -1.0,
+        }
+    }
+}
+
+/// Come si sta muovendo il carrier in questo momento. Non e' un ricordo del
+/// passato ma il suo stato di moto: gli oggetti che incontra lo cambiano, e
+/// senza incontri prosegue com'e'.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Motion {
+    Straight(Heading),
+    /// Sta percorrendo un arco attorno a `centre` per altri `remaining`
+    /// radianti, dopodiche' riparte dritto verso `exit`.
+    Turning {
+        centre: Vec2,
+        remaining: f32,
+        sense: Sense,
+        exit: Heading,
+    },
+}
+
+impl Motion {
+    /// Verso di marcia lungo gli assi, se non e' in curva.
+    pub fn heading(self) -> Option<Heading> {
+        match self {
+            Motion::Straight(heading) => Some(heading),
+            Motion::Turning { .. } => None,
+        }
+    }
+}
+
+/// Scarto trasversale entro cui il carrier e' sulla stessa linea dell'oggetto.
+const REACH_ACROSS: f32 = 4.0;
+
+/// Vero se il carrier, compiendo `step`, attraversa in questo frame il centro
+/// dell'oggetto. Gli oggetti che dirottano il carrier agiscono in quell'istante:
+/// prenderlo prima vorrebbe dire spostarlo di scatto sulla nuova traiettoria.
+///
+/// Il confronto e' un attraversamento e non una vicinanza: chi e' fermo **sul**
+/// centro non lo sta attraversando, e questo e' cio' che impedisce a un oggetto
+/// di riprendere il carrier che ha appena girato, mandandolo in tondo.
+pub fn crosses(object: Vec3, carrier: Vec3, step: Vec3, heading: Heading) -> bool {
+    let along = heading.as_vec();
+    let delta = carrier.truncate() - object.truncate();
+
+    delta.dot(along) < 0.0
+        && (delta + step.truncate()).dot(along) >= 0.0
+        && delta.perp_dot(along).abs() <= REACH_ACROSS
+}
+
+/// Il carrier non sa niente del percorso: sono gli oggetti che incontra a dirgli
 /// dove andare. Porta pero' la propria identita', che serve anche senza interfaccia.
 #[derive(Component)]
 pub struct Carrier {
@@ -51,6 +167,7 @@ pub struct Carrier {
     pub carrier_id: u32,
     /// Uno e uno solo, quando c'e'.
     pub sample_id: Option<SampleId>,
+    pub motion: Motion,
 }
 
 /// Contatore progressivo dei carrier. Riparte da 1 a ogni avvio.
@@ -193,6 +310,7 @@ pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut N
                 kind: CarrierType::WithTube,
                 carrier_id,
                 sample_id: placeholder_sample_id(carrier_id),
+                motion: Motion::Straight(Heading::Left),
             },
             children![Tube],
         ));
@@ -203,6 +321,7 @@ pub fn spawn_random_carrier(commands: &mut Commands, position: Vec3, ids: &mut N
                 kind: CarrierType::Empty,
                 carrier_id,
                 sample_id: None,
+                motion: Motion::Straight(Heading::Left),
             },
         ));
     }
@@ -214,21 +333,82 @@ fn placeholder_sample_id(carrier_id: u32) -> Option<SampleId> {
     SampleId::new(&format!("SMP-{carrier_id:08}"))
 }
 
-/// Spostamento di un carrier in questo frame. Solo i carrier con tubo vengono
-/// deviati; gli altri tirano dritto sulla corsia.
+/// Quello che il mondo puo' dire a un carrier in movimento.
+pub struct Track<'a> {
+    pub diverts: &'a [(&'a Divert, Vec3)],
+    pub turners: &'a [(&'a Turner, Vec3)],
+    pub reversers: &'a [(&'a Reverser, Vec3)],
+}
+
+/// Spostamento del carrier in questo frame e come si muovera' dopo. L'ordine di
+/// precedenza e' quello scritto: chi e' in curva la finisce, poi contano gli
+/// oggetti che cambiano marcia, infine la deviazione di corsia.
 fn carrier_step(
     carrier: &Carrier,
     translation: Vec3,
-    diverts: &[(&Divert, Vec3)],
+    track: &Track,
     delta_secs: f32,
-) -> Vec3 {
-    let straight = Vec3::new(-BELT_SPEED * delta_secs, 0.0, 0.0);
+) -> (Vec3, Motion) {
+    // 1. Una curva iniziata va portata a termine: finche' dura, il resto tace.
+    if let Motion::Turning {
+        centre,
+        remaining,
+        sense,
+        exit,
+    } = carrier.motion
+    {
+        let turned = (BELT_SPEED / TURN_RADIUS * delta_secs).min(remaining);
+        let offset =
+            Vec2::from_angle(sense.sign() * turned).rotate(translation.truncate() - centre);
+        let step = (centre + offset - translation.truncate()).extend(0.0);
 
-    if carrier.kind != CarrierType::WithTube {
-        return straight;
+        let left = remaining - turned;
+        let next = if left <= 0.0 {
+            Motion::Straight(exit)
+        } else {
+            Motion::Turning {
+                centre,
+                remaining: left,
+                sense,
+                exit,
+            }
+        };
+
+        return (step, next);
     }
 
-    for (divert, position) in diverts {
+    let heading = carrier.motion.heading().unwrap_or(Heading::Left);
+    let straight = (heading.as_vec() * BELT_SPEED * delta_secs).extend(0.0);
+
+    // 2. L'inversione vale per qualunque marcia, orizzontale o verticale: la
+    //    curva si costruisce rispetto alla direzione del carrier. Dopo il mezzo
+    //    giro il carrier esce a una cella di distanza, quindi lo stesso oggetto
+    //    non lo riprende e non si crea un cerchio infinito.
+    for (reverser, position) in track.reversers {
+        if reverser.active && crosses(*position, translation, straight, heading) {
+            // Si parte dal centro esatto dell'oggetto: e' quello che rende il
+            // diametro della curva una cella piena.
+            let snap = (position.truncate() - translation.truncate()).extend(0.0);
+            return (snap, reverser.turn(*position, heading));
+        }
+    }
+
+    // 3. La svolta vale per tutti i carrier, tubo o non tubo.
+    for (turner, position) in track.turners {
+        if turner.active && crosses(*position, translation, straight, heading) {
+            // Si riparte dal centro esatto dell'oggetto, altrimenti la nuova
+            // marcia partirebbe sfalsata rispetto alla griglia.
+            let snap = (position.truncate() - translation.truncate()).extend(0.0);
+            return (snap, Motion::Straight(heading.turn_right()));
+        }
+    }
+
+    // 4. La deviazione di corsia riguarda solo i carrier con tubo.
+    if carrier.kind != CarrierType::WithTube {
+        return (straight, carrier.motion);
+    }
+
+    for (divert, position) in track.diverts {
         if !divert.catches(*position, translation) {
             continue;
         }
@@ -244,17 +424,20 @@ fn carrier_step(
             continue;
         }
 
-        return Vec3::new(-CARRIER_DIVERT_SPEED * delta_secs, lift, 0.0);
+        let along = heading.as_vec().x * CARRIER_DIVERT_SPEED * delta_secs;
+        return (Vec3::new(along, lift, 0.0), carrier.motion);
     }
 
-    straight
+    (straight, carrier.motion)
 }
 
 fn move_carrier(
     time: Res<Time>,
-    mut query: Query<(Entity, &Carrier, &mut Transform)>,
+    mut query: Query<(Entity, &mut Carrier, &mut Transform)>,
     gates: Query<(&Gate, &Transform), Without<Carrier>>,
     diverts: Query<(&Divert, &Transform), Without<Carrier>>,
+    turners: Query<(&Turner, &Transform), Without<Carrier>>,
+    reversers: Query<(&Reverser, &Transform), Without<Carrier>>,
 ) {
     let delta_secs = time.delta_secs();
 
@@ -268,28 +451,39 @@ fn move_carrier(
         .iter()
         .map(|(divert, transform)| (divert, transform.translation))
         .collect();
+    let turners: Vec<(&Turner, Vec3)> = turners
+        .iter()
+        .map(|(turner, transform)| (turner, transform.translation))
+        .collect();
+    let reversers: Vec<(&Reverser, Vec3)> = reversers
+        .iter()
+        .map(|(reverser, transform)| (reverser, transform.translation))
+        .collect();
+    let track = Track {
+        diverts: &diverts,
+        turners: &turners,
+        reversers: &reversers,
+    };
 
     // Si risolve un carrier alla volta partendo da quello piu' avanti sul nastro:
     // chi si ferma deve bloccare a cascata tutti quelli che ha dietro.
-    let mut belt: Vec<(Entity, Vec3, Vec3)> = query
+    let mut belt: Vec<(Entity, Vec3, Vec3, Motion)> = query
         .iter()
         .map(|(entity, carrier, transform)| {
             let translation = transform.translation;
-            (
-                entity,
-                translation,
-                carrier_step(carrier, translation, &diverts, delta_secs),
-            )
+            let (step, motion) = carrier_step(carrier, translation, &track, delta_secs);
+
+            (entity, translation, step, motion)
         })
         .collect();
     belt.sort_by(|a, b| a.1.x.total_cmp(&b.1.x));
 
-    let mut resolved: Vec<(Entity, Vec3)> = Vec::with_capacity(belt.len());
-    for (entity, translation, step) in belt {
+    let mut resolved: Vec<(Entity, Vec3, Option<Motion>)> = Vec::with_capacity(belt.len());
+    for (entity, translation, step, motion) in belt {
         let candidate = translation + step;
         // Il passo viene annullato solo se avvicina il carrier a uno gia' troppo
         // vicino: cosi' chi e' sovrapposto puo' comunque allontanarsi.
-        let blocked = resolved.iter().any(|(_, ahead)| {
+        let blocked = resolved.iter().any(|(_, ahead, _)| {
             let gap = candidate.distance(*ahead);
             gap < CARRIER_SIZE && gap < translation.distance(*ahead)
         })
@@ -300,12 +494,24 @@ fn move_carrier(
                 blocks_circle(*gate, candidate, CARRIER_RADIUS)
                     && !blocks_circle(*gate, translation, CARRIER_RADIUS)
             });
-        resolved.push((entity, if blocked { translation } else { candidate }));
+        // Il carrier fermato non avanza e non cambia stato di moto: la curva
+        // appena cominciata ripartira' dal punto giusto quando la via si libera.
+        resolved.push(if blocked {
+            (entity, translation, None)
+        } else {
+            (entity, candidate, Some(motion))
+        });
     }
 
-    for (entity, translation) in resolved {
-        if let Ok((_, _, mut transform)) = query.get_mut(entity) {
+    for (entity, translation, motion) in resolved {
+        if let Ok((_, mut carrier, mut transform)) = query.get_mut(entity) {
             transform.translation = translation;
+
+            if let Some(motion) = motion
+                && carrier.motion != motion
+            {
+                carrier.motion = motion;
+            }
         }
     }
 }
@@ -333,7 +539,32 @@ mod tests {
             kind,
             carrier_id: 1,
             sample_id: None,
+            motion: Motion::Straight(Heading::Left),
         }
+    }
+
+    /// Percorso con i soli deviatori: la maggior parte dei test non ha bisogno
+    /// degli altri oggetti.
+    fn only_diverts<'a>(diverts: &'a [(&'a Divert, Vec3)]) -> Track<'a> {
+        Track {
+            diverts,
+            turners: &[],
+            reversers: &[],
+        }
+    }
+
+    /// Fa avanzare il carrier finche' non si esaurisce il numero di passi,
+    /// aggiornando anche il suo stato di moto.
+    fn run(carrier: &mut Carrier, from: Vec3, track: &Track, steps: usize) -> Vec3 {
+        let mut position = from;
+
+        for _ in 0..steps {
+            let (step, motion) = carrier_step(carrier, position, track, DELTA);
+            position += step;
+            carrier.motion = motion;
+        }
+
+        position
     }
 
     /// Il caso completo: divert sulla corsia principale, ATR una cella piu' su.
@@ -358,7 +589,7 @@ mod tests {
         let mut highest = MAIN_LANE;
 
         for _ in 0..1000 {
-            position += carrier_step(&carrier, position, &deviators, DELTA);
+            position += carrier_step(&carrier, position, &only_diverts(&deviators), DELTA).0;
             highest = highest.max(position.y);
         }
 
@@ -382,7 +613,13 @@ mod tests {
         let mut position = Vec3::new(DIVERT_ZONE_HALF_WIDTH, MAIN_LANE + LANE_HEIGHT, 0.0);
 
         for _ in 0..200 {
-            position += carrier_step(&carrier, position, &[(&atr, atr_position)], DELTA);
+            position += carrier_step(
+                &carrier,
+                position,
+                &only_diverts(&[(&atr, atr_position)]),
+                DELTA,
+            )
+            .0;
         }
 
         assert_eq!(position.y, MAIN_LANE);
@@ -396,7 +633,12 @@ mod tests {
         let almost_there = Vec3::new(0.0, MAIN_LANE + 1.0, 0.0);
 
         let atr_position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
-        let step = carrier_step(&carrier, almost_there, &[(&atr, atr_position)], DELTA);
+        let (step, _) = carrier_step(
+            &carrier,
+            almost_there,
+            &only_diverts(&[(&atr, atr_position)]),
+            DELTA,
+        );
 
         assert_eq!(step.y, -1.0, "scende solo il px che manca");
         assert!(
@@ -425,13 +667,187 @@ mod tests {
 
         let mut position = Vec3::new(200.0, MAIN_LANE, 0.0);
         for _ in 0..400 {
-            position += carrier_step(&carrier, position, &deviators, DELTA);
+            position += carrier_step(&carrier, position, &only_diverts(&deviators), DELTA).0;
             assert_eq!(
                 position.y, MAIN_LANE,
                 "il carrier non deve lasciare la corsia a x = {}",
                 position.x
             );
         }
+    }
+
+    /// Chi va a sinistra svolta verso l'alto: la destra e' quella del carrier.
+    #[test]
+    fn a_turner_sends_a_leftward_carrier_upwards() {
+        let turner = Turner { active: true };
+        let turner_position = Vec3::new(0.0, MAIN_LANE, 0.0);
+        let track = Track {
+            diverts: &[],
+            turners: &[(&turner, turner_position)],
+            reversers: &[],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        let start = Vec3::new(2.0 * GRID_STEP, MAIN_LANE, 0.0);
+        let end = run(&mut carrier, start, &track, 400);
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Up));
+        assert_eq!(end.x, turner_position.x, "sale sulla colonna dell'oggetto");
+        assert!(
+            end.y > MAIN_LANE + 2.0 * GRID_STEP,
+            "ha continuato a salire"
+        );
+    }
+
+    /// Lo stesso oggetto su una marcia diversa: chi sale prosegue verso destra.
+    /// E' questo che permette di riportare un carrier verso il punto di partenza.
+    #[test]
+    fn the_same_turner_sends_a_rising_carrier_to_the_right() {
+        let turner = Turner { active: true };
+        let turner_position = Vec3::ZERO;
+        let track = Track {
+            diverts: &[],
+            turners: &[(&turner, turner_position)],
+            reversers: &[],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        carrier.motion = Motion::Straight(Heading::Up);
+        let end = run(
+            &mut carrier,
+            Vec3::new(0.0, -2.0 * GRID_STEP, 0.0),
+            &track,
+            400,
+        );
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Right));
+        assert_eq!(end.y, turner_position.y, "prosegue sulla riga dell'oggetto");
+        assert!(end.x > 2.0 * GRID_STEP, "e' andato verso destra");
+    }
+
+    /// Quattro svolte a destra riportano il carrier nella marcia iniziale.
+    #[test]
+    fn four_right_turns_come_back_to_the_start() {
+        let heading = Heading::Left;
+
+        assert_eq!(
+            heading.turn_right().turn_right().turn_right().turn_right(),
+            heading
+        );
+    }
+
+    #[test]
+    fn a_switched_off_turner_lets_the_carrier_through() {
+        let turner = Turner { active: false };
+        let track = Track {
+            diverts: &[],
+            turners: &[(&turner, Vec3::new(0.0, MAIN_LANE, 0.0))],
+            reversers: &[],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        let end = run(
+            &mut carrier,
+            Vec3::new(GRID_STEP, MAIN_LANE, 0.0),
+            &track,
+            200,
+        );
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Left));
+        assert_eq!(end.y, MAIN_LANE);
+    }
+
+    /// Il punto dell'inversione: il carrier riparte verso destra su una linea
+    /// diversa da quella di andata, senza mai risalire sopra di essa.
+    #[test]
+    fn the_reverser_sends_the_carrier_back_on_another_line() {
+        let reverser = Reverser {
+            sense: Sense::CounterClockwise,
+            active: true,
+        };
+        let reverser_position = Vec3::new(0.0, MAIN_LANE, 0.0);
+        let track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[(&reverser, reverser_position)],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        let mut position = Vec3::new(2.0 * GRID_STEP, MAIN_LANE, 0.0);
+        let mut highest: f32 = MAIN_LANE;
+
+        for _ in 0..400 {
+            let (step, motion) = carrier_step(&carrier, position, &track, DELTA);
+            position += step;
+            carrier.motion = motion;
+            highest = highest.max(position.y);
+        }
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Right));
+        assert!(
+            (position.y - (MAIN_LANE - GRID_STEP)).abs() < 0.01,
+            "rientra una cella sotto, non a {}",
+            position.y
+        );
+        assert!(
+            highest <= MAIN_LANE + 0.01,
+            "non deve mai risalire sopra la linea di andata"
+        );
+        assert!(position.x > 0.0, "e' ripartito verso destra");
+    }
+
+    /// Il caso che mancava: un carrier che sale viene invertito e rimandato giu'
+    /// su una colonna diversa da quella di salita.
+    #[test]
+    fn the_reverser_also_turns_a_rising_carrier() {
+        let reverser = Reverser {
+            sense: Sense::CounterClockwise,
+            active: true,
+        };
+        let reverser_position = Vec3::new(0.0, 0.0, 0.0);
+        let track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[(&reverser, reverser_position)],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        carrier.motion = Motion::Straight(Heading::Up);
+
+        let start = Vec3::new(0.0, -2.0 * GRID_STEP, 0.0);
+        let end = run(&mut carrier, start, &track, 400);
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Down));
+        assert!(
+            (end.x - (-GRID_STEP)).abs() < 0.01,
+            "deve scendere una colonna di lato, non a x = {}",
+            end.x
+        );
+        assert!(end.y < 0.0, "sta scendendo");
+    }
+
+    #[test]
+    fn a_switched_off_reverser_lets_the_carrier_through() {
+        let reverser = Reverser {
+            sense: Sense::CounterClockwise,
+            active: false,
+        };
+        let track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[(&reverser, Vec3::new(0.0, MAIN_LANE, 0.0))],
+        };
+
+        let mut carrier = carrier(CarrierType::Empty);
+        let end = run(
+            &mut carrier,
+            Vec3::new(GRID_STEP, MAIN_LANE, 0.0),
+            &track,
+            200,
+        );
+
+        assert_eq!(carrier.motion, Motion::Straight(Heading::Left));
+        assert!(end.x < -GRID_STEP, "ha tirato dritto");
     }
 
     #[test]
@@ -476,7 +892,12 @@ mod tests {
     fn empty_carriers_are_never_diverted() {
         let carrier = carrier(CarrierType::Empty);
         let position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
-        let step = carrier_step(&carrier, position, &[(&atr(), position)], DELTA);
+        let (step, _) = carrier_step(
+            &carrier,
+            position,
+            &only_diverts(&[(&atr(), position)]),
+            DELTA,
+        );
 
         assert_eq!(step.y, 0.0);
     }

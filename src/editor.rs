@@ -1,3 +1,4 @@
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::sprite_render::AlphaMode2d;
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,9 @@ use crate::divert::{self, Divert, DivertAssets, DivertKind};
 use crate::gate::{self, Gate, GateAssets};
 use crate::grid;
 use crate::layout::{self, Layout, LayoutFile, LayoutObject, Placed, place_in_cell, spawn_layout};
-use crate::source::{self, SourceAssets};
+use crate::reverser::{self, Reverser, ReverserAssets};
+use crate::source::{self, CarrierSource, SourceAssets};
+use crate::turner::{self, Turner, TurnerAssets};
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -28,6 +31,14 @@ pub enum Tool {
     Divert,
     Atr,
     Despawner,
+    /// Svolta a destra rispetto alla marcia del carrier. Il nome serializzato
+    /// resta quello di prima per non invalidare i layout gia' salvati.
+    #[serde(alias = "Riser")]
+    Turner,
+    /// Curva antioraria. Il nome resta quello di prima perche' e' il vocabolario
+    /// dei file gia' salvati: rinominarlo li invaliderebbe.
+    Reverser,
+    ReverserClockwise,
 }
 
 impl Tool {
@@ -38,6 +49,9 @@ impl Tool {
             Tool::Divert => "Divert",
             Tool::Atr => "ATR",
             Tool::Despawner => "Despawn",
+            Tool::Turner => "Svolta",
+            Tool::Reverser => "Inv. antior.",
+            Tool::ReverserClockwise => "Inv. oraria",
         }
     }
 }
@@ -49,6 +63,9 @@ impl Tool {
 pub enum EditorTool {
     /// Nessun oggetto: il trascinamento sposta la vista.
     Pan,
+    /// Il clic rimuove l'oggetto su cui cade. I carrier non si toccano: sono
+    /// merce di passaggio, non pezzi del layout.
+    Erase,
     Place(Tool),
 }
 
@@ -56,19 +73,24 @@ impl EditorTool {
     fn label(self) -> &'static str {
         match self {
             EditorTool::Pan => "Sposta",
+            EditorTool::Erase => "Cancella",
             EditorTool::Place(tool) => tool.label(),
         }
     }
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 6] = [
+const MODES: [EditorTool; 10] = [
     EditorTool::Pan,
+    EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
     EditorTool::Place(Tool::Gate),
     EditorTool::Place(Tool::Divert),
     EditorTool::Place(Tool::Atr),
     EditorTool::Place(Tool::Despawner),
+    EditorTool::Place(Tool::Turner),
+    EditorTool::Place(Tool::Reverser),
+    EditorTool::Place(Tool::ReverserClockwise),
 ];
 
 /// Modo attivo.
@@ -157,12 +179,29 @@ fn cursor_cell(
     Some(grid::cell(position))
 }
 
-/// Accende o spegne l'oggetto, qualunque dei due tipi commutabili sia.
-fn toggle_object(entity: Entity, gates: &mut Query<&mut Gate>, diverts: &mut Query<&mut Divert>) {
-    if let Ok(mut gate) = gates.get_mut(entity) {
+/// Gli oggetti che si accendono e si spengono. Raggrupparli evita di trascinare
+/// quattro query separate in ogni sistema che li commuta.
+#[derive(SystemParam)]
+struct Switches<'w, 's> {
+    sources: Query<'w, 's, &'static mut CarrierSource>,
+    gates: Query<'w, 's, &'static mut Gate>,
+    diverts: Query<'w, 's, &'static mut Divert>,
+    turners: Query<'w, 's, &'static mut Turner>,
+    reversers: Query<'w, 's, &'static mut Reverser>,
+}
+
+/// Accende o spegne l'oggetto, qualunque dei tipi commutabili sia.
+fn toggle_object(entity: Entity, switches: &mut Switches) {
+    if let Ok(mut source) = switches.sources.get_mut(entity) {
+        source.active = !source.active;
+    } else if let Ok(mut gate) = switches.gates.get_mut(entity) {
         gate.active = !gate.active;
-    } else if let Ok(mut divert) = diverts.get_mut(entity) {
+    } else if let Ok(mut divert) = switches.diverts.get_mut(entity) {
         divert.active = !divert.active;
+    } else if let Ok(mut turner) = switches.turners.get_mut(entity) {
+        turner.active = !turner.active;
+    } else if let Ok(mut reverser) = switches.reversers.get_mut(entity) {
+        reverser.active = !reverser.active;
     }
 }
 
@@ -172,6 +211,8 @@ fn tool_shape(
     gate_assets: &GateAssets,
     divert_assets: &DivertAssets,
     despawner_assets: &DespawnerAssets,
+    turner_assets: &TurnerAssets,
+    reverser_assets: &ReverserAssets,
 ) -> (Handle<Mesh>, Quat) {
     match tool {
         Tool::CarrierSource => source::shape(source_assets),
@@ -179,6 +220,8 @@ fn tool_shape(
         Tool::Divert => divert::shape(divert_assets, DivertKind::Divert),
         Tool::Atr => divert::shape(divert_assets, DivertKind::Atr),
         Tool::Despawner => despawner::shape(despawner_assets),
+        Tool::Turner => turner::shape(turner_assets),
+        Tool::Reverser | Tool::ReverserClockwise => reverser::shape(reverser_assets),
     }
 }
 
@@ -309,6 +352,8 @@ fn update_ghost(
     gate_assets: Res<GateAssets>,
     divert_assets: Res<DivertAssets>,
     despawner_assets: Res<DespawnerAssets>,
+    turner_assets: Res<TurnerAssets>,
+    reverser_assets: Res<ReverserAssets>,
     ui_interactions: Query<&Interaction>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
@@ -334,6 +379,8 @@ fn update_ghost(
         &gate_assets,
         &divert_assets,
         &despawner_assets,
+        &turner_assets,
+        &reverser_assets,
     );
     let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
         .with_rotation(rotation);
@@ -398,8 +445,7 @@ fn place_selected_tool(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     placed: Query<(Entity, &Placed)>,
     ui_interactions: Query<&Interaction>,
-    mut gates: Query<&mut Gate>,
-    mut diverts: Query<&mut Divert>,
+    mut switches: Switches,
     selected: Res<SelectedTool>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -424,7 +470,7 @@ fn place_selected_tool(
         // Stesso strumento: si accende o si spegne quello che c'e'. Il colore lo
         // aggiorna il modulo dell'oggetto guardando lo stato.
         if occupant == tool {
-            toggle_object(entity, &mut gates, &mut diverts);
+            toggle_object(entity, &mut switches);
             return;
         }
 
@@ -444,8 +490,7 @@ fn toggle_by_click(
     ui_interactions: Query<&Interaction>,
     selected: Res<SelectedTool>,
     placed: Query<(Entity, &Placed)>,
-    mut gates: Query<&mut Gate>,
-    mut diverts: Query<&mut Divert>,
+    mut switches: Switches,
     mut press: ResMut<PressOrigin>,
 ) {
     let cursor = windows
@@ -483,7 +528,7 @@ fn toggle_by_click(
         return;
     };
 
-    toggle_object(entity, &mut gates, &mut diverts);
+    toggle_object(entity, &mut switches);
 }
 
 /// I due bottoni sul file di layout. Il salvataggio raccoglie quello che c'e' in
