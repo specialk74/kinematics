@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use crate::geometry::circle_touches_box;
+
 pub const GATE_WIDTH: f32 = 8.0;
 pub const GATE_HEIGHT: f32 = 44.0;
 
@@ -45,9 +47,12 @@ fn setup_gate_assets(
 /// Il raggio arriva da fuori: cosi' il gate non ha bisogno di sapere nulla
 /// di com'e' fatto un carrier.
 pub fn blocks_circle(gate: Vec3, point: Vec3, radius: f32) -> bool {
-    let half_gate = Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0;
-    let distance = (point.truncate() - gate.truncate()).abs() - half_gate;
-    distance.max(Vec2::ZERO).length() < radius
+    circle_touches_box(
+        gate,
+        Vec2::new(GATE_WIDTH, GATE_HEIGHT) / 2.0,
+        point,
+        radius,
+    )
 }
 
 /// Mesh e orientamento del gate, condivisi con l'anteprima dell'editor.

@@ -92,6 +92,7 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2) {
         Tool::Gate => crate::gate::spawn_gate(commands, position),
         Tool::Divert => crate::divert::spawn_divert(commands, position, DivertKind::Divert),
         Tool::Atr => crate::divert::spawn_divert(commands, position, DivertKind::Atr),
+        Tool::Despawner => crate::despawner::spawn_despawner(commands, position),
     };
 
     commands.entity(object).insert(Placed { tool, cell });

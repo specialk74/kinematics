@@ -9,9 +9,11 @@ use clap::Parser;
 mod camera;
 mod carrier;
 mod cli;
+mod despawner;
 mod divert;
 mod editor;
 mod gate;
+mod geometry;
 mod grid;
 mod layout;
 mod simulation;
@@ -20,8 +22,9 @@ mod source;
 use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
 use cli::Options;
+use despawner::{DespawnerPlugin, DespawnerVisualsPlugin};
 use divert::DivertVisualsPlugin;
-use editor::{EditorPlugin, PALETTE_WIDTH};
+use editor::EditorPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
@@ -30,13 +33,6 @@ use source::{SourcePlugin, SourceVisualsPlugin};
 
 pub const WIDTH: u32 = 1024;
 pub const HEIGTH: u32 = 768;
-/// Confini dell'area di lavoro in coordinate mondo. A sinistra si ferma dove
-/// inizia la barra degli strumenti; sugli altri lati coincide con la finestra.
-/// Sono costanti perche' la simulazione deve poterli usare anche senza camera.
-pub const WORK_AREA_LEFT: f32 = -(WIDTH as f32) / 2.0 + PALETTE_WIDTH;
-pub const WORK_AREA_RIGHT: f32 = WIDTH as f32 / 2.0;
-pub const WORK_AREA_TOP: f32 = HEIGTH as f32 / 2.0;
-pub const WORK_AREA_BOTTOM: f32 = -(HEIGTH as f32) / 2.0;
 
 /// Cadenza del passo headless. Senza finestra non c'e' un monitor a dare il
 /// ritmo: senza questa attesa il ciclo girerebbe a vuoto al massimo della CPU.
@@ -78,9 +74,16 @@ fn main() {
             SourceVisualsPlugin,
             GateVisualsPlugin,
             DivertVisualsPlugin,
+            DespawnerVisualsPlugin,
         ));
     }
 
-    app.add_plugins((SimulationPlugin, LayoutPlugin, CarrierPlugin, SourcePlugin))
-        .run();
+    app.add_plugins((
+        SimulationPlugin,
+        LayoutPlugin,
+        CarrierPlugin,
+        SourcePlugin,
+        DespawnerPlugin,
+    ))
+    .run();
 }

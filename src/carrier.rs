@@ -5,7 +5,6 @@ use rand::prelude::*;
 use crate::divert::Divert;
 use crate::gate::{Gate, blocks_circle};
 use crate::simulation::SimulationState;
-use crate::{WORK_AREA_BOTTOM, WORK_AREA_LEFT, WORK_AREA_RIGHT, WORK_AREA_TOP};
 
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
@@ -83,7 +82,7 @@ impl Plugin for CarrierPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NextCarrierId>().add_systems(
             Update,
-            (move_carrier, despawn_offscreen).run_if(in_state(SimulationState::Running)),
+            move_carrier.run_if(in_state(SimulationState::Running)),
         );
     }
 }
@@ -480,22 +479,5 @@ mod tests {
         let step = carrier_step(&carrier, position, &[(&atr(), position)], DELTA);
 
         assert_eq!(step.y, 0.0);
-    }
-}
-
-/// Vero se il carrier ha lasciato del tutto l'area di lavoro. Il conto e' sui
-/// confini noti dell'area, non sulla camera: cosi' vale anche senza interfaccia.
-fn outside_work_area(translation: Vec3) -> bool {
-    translation.x + CARRIER_RADIUS < WORK_AREA_LEFT
-        || translation.x - CARRIER_RADIUS > WORK_AREA_RIGHT
-        || translation.y + CARRIER_RADIUS < WORK_AREA_BOTTOM
-        || translation.y - CARRIER_RADIUS > WORK_AREA_TOP
-}
-
-fn despawn_offscreen(mut commands: Commands, query: Query<(Entity, &Transform), With<Carrier>>) {
-    for (entity, transform) in query.iter() {
-        if outside_work_area(transform.translation) {
-            commands.entity(entity).despawn();
-        }
     }
 }

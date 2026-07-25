@@ -3,6 +3,7 @@ use bevy::sprite_render::AlphaMode2d;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::Carrier;
+use crate::despawner::{self, DespawnerAssets};
 use crate::divert::{self, Divert, DivertAssets, DivertKind};
 use crate::gate::{self, Gate, GateAssets};
 use crate::grid;
@@ -26,6 +27,7 @@ pub enum Tool {
     Gate,
     Divert,
     Atr,
+    Despawner,
 }
 
 impl Tool {
@@ -35,6 +37,7 @@ impl Tool {
             Tool::Gate => "Gate",
             Tool::Divert => "Divert",
             Tool::Atr => "ATR",
+            Tool::Despawner => "Despawn",
         }
     }
 }
@@ -59,12 +62,13 @@ impl EditorTool {
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 5] = [
+const MODES: [EditorTool; 6] = [
     EditorTool::Pan,
     EditorTool::Place(Tool::CarrierSource),
     EditorTool::Place(Tool::Gate),
     EditorTool::Place(Tool::Divert),
     EditorTool::Place(Tool::Atr),
+    EditorTool::Place(Tool::Despawner),
 ];
 
 /// Modo attivo.
@@ -167,12 +171,14 @@ fn tool_shape(
     source_assets: &SourceAssets,
     gate_assets: &GateAssets,
     divert_assets: &DivertAssets,
+    despawner_assets: &DespawnerAssets,
 ) -> (Handle<Mesh>, Quat) {
     match tool {
         Tool::CarrierSource => source::shape(source_assets),
         Tool::Gate => gate::shape(gate_assets),
         Tool::Divert => divert::shape(divert_assets, DivertKind::Divert),
         Tool::Atr => divert::shape(divert_assets, DivertKind::Atr),
+        Tool::Despawner => despawner::shape(despawner_assets),
     }
 }
 
@@ -302,6 +308,7 @@ fn update_ghost(
     source_assets: Res<SourceAssets>,
     gate_assets: Res<GateAssets>,
     divert_assets: Res<DivertAssets>,
+    despawner_assets: Res<DespawnerAssets>,
     ui_interactions: Query<&Interaction>,
     mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
 ) {
@@ -321,7 +328,13 @@ fn update_ghost(
         return;
     };
 
-    let (mesh, rotation) = tool_shape(tool, &source_assets, &gate_assets, &divert_assets);
+    let (mesh, rotation) = tool_shape(
+        tool,
+        &source_assets,
+        &gate_assets,
+        &divert_assets,
+        &despawner_assets,
+    );
     let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
         .with_rotation(rotation);
 
