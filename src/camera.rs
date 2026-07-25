@@ -1,7 +1,9 @@
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{DraggedPiece, EditorTool, SelectedTool, pointer_over_ui};
+use crate::editor::{
+    DraggedPiece, EditorTool, SelectedTool, button_label, pointer_over_ui, top_button,
+};
 
 /// Vista di partenza, quella a cui riporta il pulsante di reset.
 const DEFAULT_ZOOM: f32 = 1.0;
@@ -41,28 +43,10 @@ fn spawn_camera(mut commands: Commands) {
 
 fn setup_reset_button(mut commands: Commands) {
     commands.spawn((
-        Button,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            // Alla sinistra del play/pausa, che e' largo 90 e sta a 12 dal bordo.
-            right: Val::Px(110.0),
-            width: Val::Px(90.0),
-            height: Val::Px(36.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
+        top_button(1),
         BackgroundColor(Color::srgb(0.20, 0.20, 0.24)),
         ResetViewButton,
-        children![(
-            Text::new("Reset vista"),
-            TextFont {
-                font_size: 14.0,
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        )],
+        children![button_label("Reset vista")],
     ));
 }
 

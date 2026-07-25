@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_4, PI};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
@@ -31,6 +31,11 @@ pub enum Arrow {
     None,
     /// Dritta: il carrier prosegue di li'.
     Straight,
+    /// A quarantacinque gradi: e' la traiettoria del carrier deviato, cioe' la
+    /// diagonale fra la sua marcia e lo spostamento di lato. Il deviatore la
+    /// legge come tale, quindi la freccia dice il vero da qualunque parte
+    /// arrivi il flusso.
+    Deflected,
     /// Arcuata: il carrier torna indietro girando.
     Curved,
     /// Un quadrato nero: il carrier finisce li' e basta, da qualunque parte
@@ -179,14 +184,15 @@ pub fn dress(
 
     let Some((mesh, material, tilt)) = (match arrow {
         Arrow::None => None,
-        // La freccia punta sempre dove l'oggetto manda il carrier. Era disegnata
-        // a 45 gradi per suggerire la traiettoria obliqua della deviazione, ma
-        // quella diagonale dipende da come arriva il flusso — che l'oggetto non
-        // sa — quindi meta' delle volte indicava la direzione sbagliata.
         Arrow::Straight => Some((
             shapes.straight_arrow.clone(),
             shapes.arrow_material.clone(),
             0.0,
+        )),
+        Arrow::Deflected => Some((
+            shapes.straight_arrow.clone(),
+            shapes.arrow_material.clone(),
+            FRAC_PI_4,
         )),
         Arrow::Curved => Some((
             shapes.curved_arrow.clone(),

@@ -12,6 +12,11 @@ pub struct Options {
     #[arg(short, long, value_name = "FILE")]
     layout: Option<String>,
 
+    /// Avvia subito la registrazione del filmato. Richiede l'interfaccia:
+    /// senza finestra non c'e' niente da riprendere.
+    #[arg(long)]
+    pub record: bool,
+
     /// Fa girare la simulazione senza finestra, fino a Ctrl+C.
     // Il nome con trattino basso e' quello richiesto; clap lo trasformerebbe in
     // `--hide-gui`, che teniamo come alias perche' e' la forma che uno si aspetta.
@@ -32,6 +37,12 @@ mod tests {
 
     fn parse(args: &[&str]) -> Options {
         Options::parse_from(std::iter::once("chapter1").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn recording_can_be_asked_for_from_the_start() {
+        assert!(parse(&["--record"]).record);
+        assert!(!parse(&[]).record, "di norma non si registra");
     }
 
     #[test]

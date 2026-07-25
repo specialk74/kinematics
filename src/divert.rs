@@ -29,6 +29,27 @@ pub struct Divert {
 }
 
 impl Divert {
+    /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
+    ///
+    /// La freccia disegnata e' la **diagonale** fra `facing` e la sua sinistra,
+    /// cioe' la traiettoria che il carrier seguira'. Quella diagonale descrive
+    /// due sole marce possibili — le sue due componenti — e per ciascuna lo
+    /// spostamento e' l'altra componente. Da un'altra direzione la diagonale non
+    /// vuol dire niente, e il deviatore non tocca nessuno.
+    ///
+    /// I due assi risultano cosi' sempre perpendicolari: e' questo che impedisce
+    /// a un deviatore di agganciare carrier lontanissimi sulla perpendicolare,
+    /// come succedeva quando freccia e marcia cadevano sullo stesso asse.
+    pub fn shift(facing: Heading, heading: Heading) -> Option<Heading> {
+        if heading == facing {
+            Some(facing.turn_left())
+        } else if heading == facing.turn_left() {
+            Some(facing)
+        } else {
+            None
+        }
+    }
+
     /// Vero se il deviatore, piazzato in `position` e girato verso `facing`,
     /// aggancia un carrier che marcia in `heading`. La fascia copre il
     /// corridoio fra la linea del deviatore e quella di destinazione: ci sta
@@ -45,15 +66,9 @@ impl Divert {
             return false;
         }
 
-        // Un deviatore sposta *di lato*: se la sua freccia e' parallela alla
-        // marcia del carrier non c'e' nessun lato verso cui spostarlo, e non
-        // deve fare niente. Senza questo controllo i due vincoli qui sotto
-        // cadrebbero entrambi sullo stesso asse, lasciando l'altro libero: il
-        // deviatore aggancerebbe carrier a qualunque distanza sulla
-        // perpendicolare, anche a mezzo impianto di distanza.
-        if facing.as_vec().dot(heading.as_vec()) != 0.0 {
+        let Some(shift) = Divert::shift(facing, heading) else {
             return false;
-        }
+        };
 
         let delta = carrier.truncate() - position.truncate();
         if delta.dot(heading.as_vec()).abs() > DIVERT_ZONE_HALF_WIDTH {
@@ -62,7 +77,7 @@ impl Divert {
 
         let corridor = -DIVERT_LANE_TOLERANCE..=LANE_HEIGHT + DIVERT_LANE_TOLERANCE;
 
-        corridor.contains(&delta.dot(facing.as_vec()))
+        corridor.contains(&delta.dot(shift.as_vec()))
     }
 }
 
@@ -124,7 +139,7 @@ fn attach_divert_visuals(
             entity,
             &shapes,
             material_for(&assets, divert),
-            Arrow::Straight,
+            Arrow::Deflected,
         );
     }
 }
@@ -191,34 +206,50 @@ mod tests {
         let below = Vec3::new(0.0, -LANE_HEIGHT / 2.0, 0.0);
 
         assert!(!divert.catches(position, below, Heading::Up, flow));
-        assert!(divert.catches(position, below, Heading::Down, flow));
+        assert!(divert.catches(position, below, Heading::Left, flow));
     }
 
-    /// Il caso che bloccava un impianto vero: un deviatore girato nel verso del
-    /// flusso, quattro celle piu' in alto, agganciava lo stesso i carrier e li
-    /// spingeva indietro. Deve ignorarli, per quanto vicini siano sull'altro asse.
+    /// La stessa freccia serve due flussi, ed e' quello che la rende leggibile:
+    /// la diagonale disegnata e' la traiettoria, e lo spostamento e' la
+    /// componente che manca alla marcia del carrier.
     #[test]
-    fn an_arrow_parallel_to_the_flow_touches_nobody() {
+    fn the_same_diagonal_serves_the_two_flows_it_describes() {
+        // Freccia in alto a sinistra: diagonale fra "su" e "sinistra".
+        let arrow = Heading::Up;
+
+        assert_eq!(
+            Divert::shift(arrow, Heading::Left),
+            Some(Heading::Up),
+            "chi va a sinistra viene alzato"
+        );
+        assert_eq!(
+            Divert::shift(arrow, Heading::Up),
+            Some(Heading::Left),
+            "chi sale viene spostato a sinistra"
+        );
+        assert_eq!(
+            Divert::shift(arrow, Heading::Right),
+            None,
+            "da destra quella diagonale non dice niente"
+        );
+        assert_eq!(Divert::shift(arrow, Heading::Down), None);
+    }
+
+    /// Il caso che bloccava un impianto vero: un deviatore quattro celle piu' in
+    /// alto agganciava carrier che non lo riguardavano e li spingeva indietro.
+    #[test]
+    fn a_far_away_divert_touches_nobody() {
         let divert = divert();
         let far_above = Vec3::new(192.0, 256.0, 0.0);
         let carrier = Vec3::new(215.0, 0.0, 0.0);
 
         assert!(
             !divert.catches(far_above, carrier, Heading::Right, Heading::Left),
-            "freccia opposta alla marcia"
+            "la sua diagonale non descrive questa marcia"
         );
         assert!(
             !divert.catches(far_above, carrier, Heading::Left, Heading::Left),
-            "freccia nel verso della marcia"
-        );
-        assert!(
-            !divert.catches(
-                Vec3::ZERO,
-                Vec3::new(10.0, 0.0, 0.0),
-                Heading::Left,
-                Heading::Left
-            ),
-            "nemmeno quando e' vicino: non c'e' un lato verso cui spostarlo"
+            "la descrive, ma il carrier e' quattro celle fuori dal corridoio"
         );
     }
 

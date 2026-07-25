@@ -77,6 +77,10 @@ impl Heading {
         }
     }
 
+    pub fn turn_left(self) -> Self {
+        self.turn_right().opposite()
+    }
+
     /// Rotazione che porta una figura disegnata verso l'alto a puntare in
     /// questo verso: e' cosi' che la freccia dentro i quadrati segue l'oggetto.
     pub fn rotation(self) -> Quat {
@@ -396,9 +400,11 @@ fn carrier_step(
             continue;
         }
 
-        // Lo spostamento segue la freccia dell'oggetto: e' la rotazione a dire
-        // dove finisce il carrier, non la sua marcia.
-        let sideways = facing.as_vec();
+        // La freccia disegna la diagonale: lo spostamento e' la sua componente
+        // trasversale alla marcia del carrier.
+        let Some(sideways) = Divert::shift(*facing, heading).map(Heading::as_vec) else {
+            continue;
+        };
         let offset = (translation.truncate() - position.truncate()).dot(sideways);
         // Il passo di lato non supera mai la destinazione: e' questo che fa
         // arrivare il carrier esattamente sulla linea voluta, invece di
@@ -602,7 +608,7 @@ mod tests {
             (&divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
             (
                 &atr(),
-                Heading::Down,
+                Heading::Left,
                 Vec3::new(-3.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
         ];
@@ -639,7 +645,7 @@ mod tests {
             position += carrier_step(
                 &carrier,
                 position,
-                &only_diverts(&[(&atr, Heading::Down, atr_position)]),
+                &only_diverts(&[(&atr, Heading::Left, atr_position)]),
                 DELTA,
             )
             .0;
@@ -659,7 +665,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             almost_there,
-            &only_diverts(&[(&atr, Heading::Down, atr_position)]),
+            &only_diverts(&[(&atr, Heading::Left, atr_position)]),
             DELTA,
         );
 
@@ -684,7 +690,7 @@ mod tests {
             (&off_divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
             (
                 &live_atr,
-                Heading::Down,
+                Heading::Left,
                 Vec3::new(-2.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
         ];
@@ -733,7 +739,7 @@ mod tests {
     #[test]
     fn an_atr_shifts_a_rising_carrier_one_column_to_its_left() {
         let atr_position = Vec3::ZERO;
-        let diverts = [(&atr(), Heading::Left, atr_position)];
+        let diverts = [(&atr(), Heading::Up, atr_position)];
         let track = only_diverts(&diverts);
 
         let mut carrier = carrier(CarrierType::WithTube);
@@ -760,7 +766,7 @@ mod tests {
             (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
             (
                 &atr(),
-                Heading::Left,
+                Heading::Up,
                 Vec3::new(GRID_STEP, 3.0 * GRID_STEP, 0.0),
             ),
         ];
@@ -813,7 +819,7 @@ mod tests {
             (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
             (
                 &atr(),
-                Heading::Left,
+                Heading::Up,
                 Vec3::new(GRID_STEP, 4.0 * GRID_STEP, 0.0),
             ),
         ];
@@ -1073,7 +1079,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             position,
-            &only_diverts(&[(&atr(), Heading::Down, position)]),
+            &only_diverts(&[(&atr(), Heading::Left, position)]),
             DELTA,
         );
 

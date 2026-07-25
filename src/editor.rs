@@ -15,7 +15,7 @@ use crate::turner::Turner;
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
-const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
+pub const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 const CAPTION_COLOR: Color = Color::srgb(0.55, 0.55, 0.62);
 /// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto
@@ -306,6 +306,27 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
         });
 }
 
+/// Posto in fila in alto a destra. Le posizioni stanno qui e non sparse nei
+/// moduli: cosi' aggiungere un bottone non ne sovrappone un altro.
+pub fn top_button(slot: u32) -> (Button, Node) {
+    const WIDTH: f32 = 96.0;
+    const GAP: f32 = 8.0;
+
+    (
+        Button,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            right: Val::Px(12.0 + slot as f32 * (WIDTH + GAP)),
+            width: Val::Px(WIDTH),
+            height: Val::Px(36.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+    )
+}
+
 fn button_node() -> (Button, Node) {
     (
         Button,
@@ -320,7 +341,7 @@ fn button_node() -> (Button, Node) {
     )
 }
 
-fn button_label(text: &str) -> (Text, TextFont, TextColor) {
+pub fn button_label(text: &str) -> (Text, TextFont, TextColor) {
     (
         Text::new(text),
         TextFont {

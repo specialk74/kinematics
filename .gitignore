@@ -1,2 +1,6 @@
 /target
 *.ron
+
+# artefatti delle registrazioni
+registrazione/
+*.mp4

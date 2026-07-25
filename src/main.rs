@@ -17,6 +17,7 @@ mod geometry;
 mod grid;
 mod layout;
 mod piece;
+mod recorder;
 mod reverser;
 mod simulation;
 mod source;
@@ -32,6 +33,7 @@ use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
 use piece::PiecePlugin;
+use recorder::{RecorderPlugin, Recording};
 use reverser::ReverserVisualsPlugin;
 use simulation::{SimulationControlsPlugin, SimulationPlugin};
 use source::{SourcePlugin, SourceVisualsPlugin};
@@ -50,6 +52,10 @@ fn main() {
 
     let mut app = App::new();
     app.insert_resource(options.layout_file());
+
+    if options.record && options.hide_gui {
+        warn!("--record richiede l'interfaccia: senza finestra non c'e' niente da riprendere");
+    }
 
     // La simulazione e' la stessa nei due casi: cambia solo chi la guarda.
     if options.hide_gui {
@@ -81,10 +87,18 @@ fn main() {
             SourceVisualsPlugin,
             GateVisualsPlugin,
             DivertVisualsPlugin,
+            RecorderPlugin,
             DespawnerVisualsPlugin,
             TurnerVisualsPlugin,
             ReverserVisualsPlugin,
         ));
+    }
+
+    if options.record && !options.hide_gui {
+        // In PostStartup perche' la risorsa nasce nello Startup del suo plugin.
+        app.add_systems(PostStartup, |mut recording: ResMut<Recording>| {
+            recording.start()
+        });
     }
 
     app.add_plugins((

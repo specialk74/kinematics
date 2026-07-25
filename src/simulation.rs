@@ -1,5 +1,9 @@
 use bevy::prelude::*;
 
+use crate::carrier::{Carrier, NextCarrierId};
+use crate::editor::{BUTTON_IDLE, button_label, top_button};
+use crate::source::CarrierSource;
+
 const RUNNING_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
 const PAUSED_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
 
@@ -19,6 +23,9 @@ struct PauseButton;
 #[derive(Component)]
 struct PauseLabel;
 
+#[derive(Component)]
+struct RestartButton;
+
 /// Solo lo stato: serve anche senza interfaccia, perche' e' quello che i sistemi
 /// di simulazione interrogano per sapere se devono girare.
 pub struct SimulationPlugin;
@@ -34,36 +41,58 @@ pub struct SimulationControlsPlugin;
 
 impl Plugin for SimulationControlsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_pause_button)
-            .add_systems(Update, (toggle_simulation, refresh_pause_button));
+        app.add_systems(Startup, (setup_pause_button, setup_restart_button))
+            .add_systems(
+                Update,
+                (toggle_simulation, refresh_pause_button, restart_simulation),
+            );
     }
 }
 
 fn setup_pause_button(mut commands: Commands) {
     commands.spawn((
-        Button,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            right: Val::Px(12.0),
-            width: Val::Px(90.0),
-            height: Val::Px(36.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
+        top_button(0),
         BackgroundColor(RUNNING_COLOR),
         PauseButton,
-        children![(
-            Text::new("Pausa"),
-            TextFont {
-                font_size: 14.0,
-                ..default()
-            },
-            TextColor(Color::WHITE),
-            PauseLabel,
-        )],
+        children![(button_label("Pausa"), PauseLabel)],
     ));
+}
+
+fn setup_restart_button(mut commands: Commands) {
+    commands.spawn((
+        top_button(2),
+        BackgroundColor(BUTTON_IDLE),
+        RestartButton,
+        children![button_label("Riavvia")],
+    ));
+}
+
+/// Svuota il nastro e riparte da capo: spariscono i carrier, la numerazione
+/// ricomincia da 1 e le sorgenti riazzerano l'attesa. Gli oggetti restano dove
+/// sono e come sono, accesi o spenti: si riavvia il traffico, non l'impianto.
+fn restart_simulation(
+    mut commands: Commands,
+    buttons: Query<&Interaction, (Changed<Interaction>, With<RestartButton>)>,
+    carriers: Query<Entity, With<Carrier>>,
+    mut sources: Query<&mut CarrierSource>,
+    mut ids: ResMut<NextCarrierId>,
+) {
+    if !buttons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+
+    for entity in carriers.iter() {
+        commands.entity(entity).despawn();
+    }
+    for mut source in sources.iter_mut() {
+        source.restart();
+    }
+    *ids = NextCarrierId::default();
+
+    info!("simulazione riavviata");
 }
 
 fn toggle_simulation(

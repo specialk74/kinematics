@@ -14,6 +14,14 @@ pub struct CarrierSource {
     pub active: bool,
 }
 
+impl CarrierSource {
+    /// Riazzera l'attesa: il prossimo carrier esce dopo un intervallo intero,
+    /// non subito perche' il timer era gia' quasi scaduto.
+    pub fn restart(&mut self) {
+        self.timer.reset();
+    }
+}
+
 pub struct SourcePlugin;
 
 impl Plugin for SourcePlugin {
