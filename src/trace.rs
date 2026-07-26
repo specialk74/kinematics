@@ -516,7 +516,7 @@ fn toggle_recording(
     mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     mut recording: ResMut<Recording>,
-    placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+    placed: Query<(&Placed, &Facing, Option<&PieceId>, Option<&PieceName>)>,
 ) {
     if !pressed(&buttons) || !can_record(&mode, &state, &recording) {
         return;
@@ -548,7 +548,14 @@ fn begin(recording: &mut Recording) {
 /// layout dell'editor con quello della registrazione precedente.
 fn park_layout<'a>(
     parked: &mut ParkedLayout,
-    pieces: impl Iterator<Item = (&'a Placed, &'a Facing, &'a PieceId, &'a PieceName)>,
+    pieces: impl Iterator<
+        Item = (
+            &'a Placed,
+            &'a Facing,
+            Option<&'a PieceId>,
+            Option<&'a PieceName>,
+        ),
+    >,
 ) {
     if parked.0.is_none() {
         parked.0 = Some(crate::layout::collect(pieces));
@@ -595,7 +602,7 @@ fn can_replay(recording: &Recording) -> bool {
 /// Chiude la registrazione e la scrive su file, layout compreso.
 fn stop_recording(
     recording: &mut Recording,
-    placed: &Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+    placed: &Query<(&Placed, &Facing, Option<&PieceId>, Option<&PieceName>)>,
 ) {
     recording.active = false;
 
@@ -618,6 +625,8 @@ fn stop_recording(
 }
 
 /// Lo stato di tutti gli oggetti in scena, ciascuno con il suo id.
+/// Un pezzo passivo non ha ne' id ne' interruttori, quindi non compare qui
+/// senza bisogno di escluderlo: la query da sola non lo trova.
 fn switch_states(objects: &Query<(&PieceId, &Switch)>) -> Vec<(u32, Switch)> {
     objects.iter().map(|(id, switch)| (id.0, *switch)).collect()
 }
@@ -672,7 +681,7 @@ fn record_frames(
 fn save_on_exit(
     mut exits: MessageReader<AppExit>,
     mut recording: ResMut<Recording>,
-    placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+    placed: Query<(&Placed, &Facing, Option<&PieceId>, Option<&PieceName>)>,
 ) {
     if exits.read().next().is_some() && recording.active {
         stop_recording(&mut recording, &placed);
@@ -779,7 +788,7 @@ fn choose_trace(
     mut commands: Commands,
     recording: Res<Recording>,
     mut parked: ResMut<ParkedLayout>,
-    pieces: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+    pieces: Query<(&Placed, &Facing, Option<&PieceId>, Option<&PieceName>)>,
     entries: Query<(&Interaction, &TraceEntry), Changed<Interaction>>,
     lists: Query<Entity, With<TraceList>>,
     mut replay: ResMut<Replay>,
@@ -1057,7 +1066,13 @@ pub fn play_from_file(
     commands: &mut Commands,
     replay: &mut Replay,
     parked: &mut ParkedLayout,
-    pieces: &Query<(Entity, &Placed, &Facing, &PieceId, &PieceName)>,
+    pieces: &Query<(
+        Entity,
+        &Placed,
+        &Facing,
+        Option<&PieceId>,
+        Option<&PieceName>,
+    )>,
     next_state: &mut NextState<SimulationState>,
     path: &str,
 ) {

@@ -125,31 +125,48 @@ pub fn place_in_cell(
         Tool::CarrierSensor => {
             crate::sensor::spawn_sensor(commands, position, crate::sensor::SensorKind::Carrier)
         }
+        Tool::Guide => crate::guide::spawn_guide(commands, position),
     };
 
-    commands.entity(object).insert((
-        Placed { tool, cell },
-        facing,
-        // In servizio, e comandato se comandarlo vuol dire agire.
-        Switch::fresh(tool.forces_signal()),
-        PieceId(who.id),
-        PieceName(who.name),
-    ));
+    commands
+        .entity(object)
+        .insert((Placed { tool, cell }, facing));
+
+    // Un pezzo passivo non prende ne' identita' ne' interruttori: e' disegno.
+    // Non avendo un id resta fuori dalle registrazioni, e non avendo un nome
+    // resta fuori dall'elenco, senza bisogno di filtrarlo due volte.
+    if !tool.is_passive() {
+        commands.entity(object).insert((
+            // In servizio, e comandato se comandarlo vuol dire agire.
+            Switch::fresh(tool.forces_signal()),
+            PieceId(who.id),
+            PieceName(who.name),
+        ));
+    }
 }
 
 /// Raccoglie in un `Layout` gli oggetti attualmente in scena. Lo usano il
 /// bottone Salva e la registrazione, che porta con se' l'impianto.
 pub fn collect<'a>(
-    objects: impl Iterator<Item = (&'a Placed, &'a Facing, &'a PieceId, &'a PieceName)>,
+    objects: impl Iterator<
+        Item = (
+            &'a Placed,
+            &'a Facing,
+            Option<&'a PieceId>,
+            Option<&'a PieceName>,
+        ),
+    >,
 ) -> Layout {
     Layout {
         objects: objects
             .map(|(placed, facing, id, name)| LayoutObject {
-                id: id.0,
+                // I pezzi passivi non hanno identita': nel file restano un tipo,
+                // una cella e un verso.
+                id: id.map(|id| id.0).unwrap_or_default(),
                 tool: placed.tool,
                 cell: (placed.cell.x, placed.cell.y),
                 facing: *facing,
-                name: name.0.clone(),
+                name: name.map(|name| name.0.clone()).unwrap_or_default(),
             })
             .collect(),
     }
@@ -178,6 +195,14 @@ pub fn fill_identities(layout: &Layout) -> Vec<Identity> {
         .objects
         .iter()
         .map(|object| {
+            // Un pezzo passivo non consuma nomi ne' numeri: non ne ha bisogno.
+            if object.tool.is_passive() {
+                return Identity {
+                    id: 0,
+                    name: String::new(),
+                };
+            }
+
             let name = if object.name.is_empty() {
                 let fresh = crate::name::next_free(object.tool, &names);
                 names.push(fresh.clone());

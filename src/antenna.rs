@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
+use crate::editor::Tool;
 use crate::engagement::Engaged;
 use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes};
 use crate::switch::{Look, Switch};
@@ -105,8 +106,10 @@ fn attach_antenna_visuals(
     antennas: Query<(Entity, &Antenna, &Switch), Without<Mesh2d>>,
 ) {
     for (entity, antenna, switch) in antennas.iter() {
+        let (shape, _) = piece::dressing(&shapes, Tool::Antenna);
+
         commands.entity(entity).insert((
-            Mesh2d(piece::circle(&shapes)),
+            Mesh2d(shape),
             MeshMaterial2d(material_for(&assets, antenna, *switch)),
         ));
     }

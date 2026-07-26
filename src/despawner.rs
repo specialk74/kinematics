@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_RADIUS, Carrier};
+use crate::editor::Tool;
 use crate::geometry::circle_touches_box;
-use crate::piece::{self, Arrow, PIECE_SIZE, PieceShapes};
+use crate::piece::{self, PIECE_SIZE, PieceShapes};
 use crate::simulation::SimulationState;
 use crate::switch::Look;
 use crate::switch::Switch;
@@ -57,12 +58,15 @@ fn attach_despawner_visuals(
     despawners: Query<(Entity, &Switch), (With<Despawner>, Without<Mesh2d>)>,
 ) {
     for (entity, switch) in despawners.iter() {
-        piece::dress(
+        let (shape, arrow) = piece::dressing(&shapes, Tool::Despawner);
+
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            shape,
             assets.look.material(*switch, false),
-            Arrow::Stop,
+            arrow,
         );
     }
 }

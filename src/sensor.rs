@@ -1,9 +1,10 @@
 use bevy::prelude::*;
 
 use crate::carrier::{COLLAR_RADIUS, Carrier, CarrierType, Heading};
+use crate::editor::Tool;
 use crate::engagement::Engaged;
 use crate::grid::GRID_STEP;
-use crate::piece::{self, Arrow, PieceShapes};
+use crate::piece::{self, PieceShapes};
 use crate::switch::{Look, Switch};
 
 /// Che cosa guarda il sensore. E' l'unica differenza fra i due: la zona che
@@ -26,6 +27,15 @@ pub struct Sensor {
     /// simulazione, lo legge l'interfaccia: cosi' il conto si fa anche senza
     /// finestra.
     pub seeing: bool,
+}
+
+impl SensorKind {
+    pub fn tool(self) -> Tool {
+        match self {
+            SensorKind::Tube => Tool::TubeSensor,
+            SensorKind::Carrier => Tool::CarrierSensor,
+        }
+    }
 }
 
 impl Sensor {
@@ -121,13 +131,15 @@ fn attach_sensor_visuals(
     sensors: Query<(Entity, &Sensor, &Switch), Without<Mesh2d>>,
 ) {
     for (entity, sensor, switch) in sensors.iter() {
+        let (shape, arrow) = piece::dressing(&shapes, sensor.kind.tool());
+
         piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
-            piece::bar(&shapes),
+            shape,
             material_for(&assets, sensor, *switch),
-            Arrow::None,
+            arrow,
         );
     }
 }

@@ -166,6 +166,8 @@ fn refresh_rows(
 
     // In ordine di nome: e' l'unico ordine che non cambia sotto gli occhi
     // quando si sposta un oggetto nella scena.
+    // I pezzi passivi non hanno un nome, quindi la query non li trova: restano
+    // fuori dall'elenco da soli, senza un filtro che lo ricordi.
     let mut rows: Vec<(Entity, Tool, String)> = objects
         .iter()
         .map(|(entity, placed, name)| (entity, placed.tool, name.0.clone()))

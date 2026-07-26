@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
+use crate::editor::Tool;
 use crate::engagement::{Engaged, in_the_same_cell};
-use crate::piece::{self, Arrow, PieceShapes};
+use crate::piece::{self, PieceShapes};
 use crate::switch::{Look, Switch};
 
 /// Dislivello fra la corsia principale e quella deviata.
@@ -30,6 +31,17 @@ pub struct Divert {
     /// Se in questo istante ha un carrier nella propria cella. Lo scrive la
     /// simulazione, lo legge il colore.
     pub engaged: bool,
+}
+
+impl DivertKind {
+    /// Lo strumento che piazza questa variante: serve a chiedere la figura
+    /// giusta senza ripetere la mappatura.
+    pub fn tool(self) -> Tool {
+        match self {
+            DivertKind::Divert => Tool::Divert,
+            DivertKind::Atr => Tool::Atr,
+        }
+    }
 }
 
 impl Divert {
@@ -178,12 +190,15 @@ fn attach_divert_visuals(
     diverts: Query<(Entity, &Divert, &Switch), Without<Mesh2d>>,
 ) {
     for (entity, divert, switch) in diverts.iter() {
-        piece::dress(
+        let (shape, arrow) = piece::dressing(&shapes, divert.kind.tool());
+
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            shape,
             material_for(&assets, divert, *switch),
-            Arrow::Deflected,
+            arrow,
         );
     }
 }

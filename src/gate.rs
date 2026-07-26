@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Blocker, Heading};
-use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes};
+use crate::editor::Tool;
+use crate::piece::{self, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes};
 use crate::switch::{Look, Switch};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
@@ -70,13 +71,15 @@ fn attach_gate_visuals(
     gates: Query<(Entity, &Switch), (With<Gate>, Without<Mesh2d>)>,
 ) {
     for (entity, switch) in gates.iter() {
+        let (shape, arrow) = piece::dressing(&shapes, Tool::Gate);
+
         piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
-            piece::bar(&shapes),
+            shape,
             material_for(&assets, *switch),
-            Arrow::None,
+            arrow,
         );
     }
 }

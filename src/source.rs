@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_SIZE, Carrier, NextCarrierId, spawn_random_carrier};
-use crate::piece::{self, Arrow, Facing, PieceShapes};
+use crate::editor::Tool;
+use crate::piece::{self, Facing, PieceShapes};
 use crate::simulation::SimulationState;
 use crate::switch::{Look, Switch};
 
@@ -66,12 +67,15 @@ fn attach_source_visuals(
     sources: Query<(Entity, &Switch), (With<CarrierSource>, Without<Mesh2d>)>,
 ) {
     for (entity, switch) in sources.iter() {
-        piece::dress(
+        let (shape, arrow) = piece::dressing(&shapes, Tool::CarrierSource);
+
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            shape,
             material_for(&assets, *switch),
-            Arrow::Straight,
+            arrow,
         );
     }
 }

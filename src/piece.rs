@@ -19,6 +19,14 @@ pub const ANTENNA_RADIUS: f32 = CARRIER_RADIUS + 2.0;
 /// cella. Cosi' il carrier che ferma si arresta quasi al centro della cella
 /// invece che sul confine, e sotto di lui ci puo' stare un'antenna che lo legge.
 pub const BAR_LENGTH: f32 = 48.0;
+/// La linea della guida: lunga quanto la cella, cosi' due tratti accostati si
+/// saldano senza lasciare buchi, e sottile perche' e' uno sfondo, non un oggetto.
+pub const GUIDE_LENGTH: f32 = GRID_STEP;
+pub const GUIDE_THICKNESS: f32 = 4.0;
+/// I due bordi stanno sui confini della cella, non al suo interno: una corsia
+/// e' cosi' alta esattamente una cella, che e' anche di quanto il divert sposta
+/// un carrier. Due corsie affiancate condividono il bordo che le separa.
+pub const GUIDE_OFFSET: f32 = GRID_STEP / 2.0;
 pub const BAR_THICKNESS: f32 = 8.0;
 /// Quanto dista dal centro della cella: appoggiata al confine e tutta dentro la
 /// propria cella, cosi' due gate accostati non si sovrappongono.
@@ -85,6 +93,7 @@ pub struct PieceShapes {
     square: Handle<Mesh>,
     circle: Handle<Mesh>,
     bar: Handle<Mesh>,
+    guide_line: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
     curved_arrow: Handle<Mesh>,
     stop: Handle<Mesh>,
@@ -105,6 +114,30 @@ fn triangles(points: Vec<[f32; 3]>) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, points)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+}
+
+/// Il corridoio: i due bordi della corsia, uno sopra e uno sotto. E' un pezzo
+/// solo perche' una corsia sono due linee, e chiederle all'utente una per volta
+/// vorrebbe dire fargli piazzare il doppio dei pezzi per lo stesso disegno.
+fn guide_corridor() -> Mesh {
+    let half = GUIDE_LENGTH / 2.0;
+    let thick = GUIDE_THICKNESS / 2.0;
+    let mut points = Vec::new();
+
+    for edge in [GUIDE_OFFSET, -GUIDE_OFFSET] {
+        let (top, bottom) = (edge + thick, edge - thick);
+
+        points.extend([
+            [-half, bottom, 0.0],
+            [half, bottom, 0.0],
+            [half, top, 0.0],
+            [-half, bottom, 0.0],
+            [half, top, 0.0],
+            [-half, top, 0.0],
+        ]);
+    }
+
+    triangles(points)
 }
 
 /// Freccia con lo stelo, disegnata verso l'alto: due triangoli per il gambo e
@@ -182,6 +215,7 @@ fn setup_piece_shapes(
         square: meshes.add(Rectangle::new(PIECE_SIZE, PIECE_SIZE)),
         circle: meshes
             .add(Mesh::from(Circle::new(ANTENNA_RADIUS)).translated_by(Vec3::Y * ANTENNA_OFFSET)),
+        guide_line: meshes.add(guide_corridor()),
         // La sbarra e' spostata nella mesh stessa e non nel Transform: la
         // posizione dell'oggetto resta il centro della cella, che e' quello che
         // sanno la griglia, il salvataggio e il trascinamento.
@@ -195,23 +229,6 @@ fn setup_piece_shapes(
         arrow_material: materials.add(ARROW_COLOR),
         stop_material: materials.add(STOP_COLOR),
     });
-}
-
-/// Mesh del quadrato, per l'anteprima dell'editor.
-pub fn square(shapes: &PieceShapes) -> Handle<Mesh> {
-    shapes.square.clone()
-}
-
-/// Mesh del cerchio dell'antenna, usata anche dall'anteprima dell'editor. Sta
-/// qui perche' l'anteprima deve avere la stessa forma dell'oggetto che promette,
-/// e averne una copia sola lo garantisce.
-pub fn circle(shapes: &PieceShapes) -> Handle<Mesh> {
-    shapes.circle.clone()
-}
-
-/// Mesh della sbarra del gate e dei sensori.
-pub fn bar(shapes: &PieceShapes) -> Handle<Mesh> {
-    shapes.bar.clone()
 }
 
 /// La figura che un oggetto occupa davvero dentro la sua cella. Serve a sapere
@@ -228,6 +245,10 @@ pub fn covers(tool: Tool, facing: Facing, centre: Vec2, point: Vec2) -> bool {
 
             local.x.abs() <= BAR_LENGTH / 2.0 && (local.y - BAR_OFFSET).abs() <= BAR_THICKNESS / 2.0
         }
+        // La linea e' sottile: pretendere il clic sui suoi quattro pixel
+        // sarebbe una caccia al pixel. Vale tutta la cella, tanto sotto di lei
+        // non c'e' nient'altro.
+        Tool::Guide => offset.abs().cmple(Vec2::splat(GRID_STEP / 2.0)).all(),
         Tool::Antenna => {
             let local = facing.0.rotation().inverse() * offset.extend(0.0);
 
@@ -237,28 +258,27 @@ pub fn covers(tool: Tool, facing: Facing, centre: Vec2, point: Vec2) -> bool {
     }
 }
 
-/// Da' corpo a un oggetto: il quadrato del suo colore, con dentro la freccia che
-/// gli compete. Chi non ha un verso resta un quadrato pieno, e infatti il gate
-/// blocca comunque lo si giri.
-pub fn dress(
-    commands: &mut Commands,
-    entity: Entity,
-    shapes: &PieceShapes,
-    material: Handle<ColorMaterial>,
-    arrow: Arrow,
-) {
-    dress_shape(
-        commands,
-        entity,
-        shapes,
-        shapes.square.clone(),
-        material,
-        arrow,
-    );
+/// Che figura e che freccia competono a un tipo di oggetto. Sta in un posto
+/// solo perche' la usano sia gli oggetti veri sia l'anteprima dell'editor: se
+/// le due mappature fossero separate, prima o poi l'anteprima mostrerebbe una
+/// cosa e il piazzamento ne farebbe un'altra.
+pub fn dressing(shapes: &PieceShapes, tool: Tool) -> (Handle<Mesh>, Arrow) {
+    match tool {
+        Tool::CarrierSource => (shapes.square.clone(), Arrow::Straight),
+        Tool::Gate => (shapes.bar.clone(), Arrow::None),
+        Tool::Divert | Tool::Atr => (shapes.square.clone(), Arrow::Deflected),
+        Tool::Despawner => (shapes.square.clone(), Arrow::Stop),
+        Tool::Turner => (shapes.square.clone(), Arrow::Straight),
+        Tool::Reverser => (shapes.square.clone(), Arrow::Curved),
+        Tool::Antenna => (shapes.circle.clone(), Arrow::None),
+        Tool::TubeSensor | Tool::CarrierSensor => (shapes.bar.clone(), Arrow::None),
+        Tool::Guide => (shapes.guide_line.clone(), Arrow::None),
+    }
 }
 
-/// Come `dress` ma con una figura scelta: la usa il gate, che e' una sbarra e
-/// non un quadrato.
+/// Da' corpo a un oggetto: la figura del suo colore, con dentro la freccia che
+/// gli compete. Chi non ha un verso resta una figura piena, e infatti il gate
+/// blocca comunque lo si giri.
 pub fn dress_shape(
     commands: &mut Commands,
     entity: Entity,

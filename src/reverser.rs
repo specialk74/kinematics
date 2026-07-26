@@ -3,9 +3,10 @@ use std::f32::consts::PI;
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading, Motion};
+use crate::editor::Tool;
 use crate::engagement::{Engaged, in_the_same_cell};
 use crate::grid::GRID_STEP;
-use crate::piece::{self, Arrow, PieceShapes};
+use crate::piece::{self, PieceShapes};
 use crate::switch::{Look, Switch};
 
 /// Raggio della curva: mezza cella, cosi' la semicirconferenza porta il carrier
@@ -103,12 +104,15 @@ fn attach_reverser_visuals(
     reversers: Query<(Entity, &Reverser, &Switch), Without<Mesh2d>>,
 ) {
     for (entity, reverser, switch) in reversers.iter() {
-        piece::dress(
+        let (shape, arrow) = piece::dressing(&shapes, Tool::Reverser);
+
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            shape,
             material_for(&assets, reverser, *switch),
-            Arrow::Curved,
+            arrow,
         );
     }
 }

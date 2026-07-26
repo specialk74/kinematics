@@ -17,6 +17,7 @@ mod engagement;
 mod gate;
 mod geometry;
 mod grid;
+mod guide;
 mod layout;
 mod name;
 mod name_panel;
@@ -39,6 +40,7 @@ use editor::EditorPlugin;
 use engagement::EngagementPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
+use guide::GuideVisualsPlugin;
 use layout::LayoutPlugin;
 use name::NamePlugin;
 use name_panel::NamePanelPlugin;
@@ -102,7 +104,7 @@ fn main() {
             SensorVisualsPlugin,
         ))
         // In due gruppi perche' un gruppo solo ha un tetto di quindici.
-        .add_plugins((NamePlugin, NamePanelPlugin));
+        .add_plugins((NamePlugin, NamePanelPlugin, GuideVisualsPlugin));
     }
 
     // Registrazione e riproduzione partono a scena gia' costruita: il layout
@@ -121,8 +123,8 @@ fn main() {
                 Entity,
                 &layout::Placed,
                 &piece::Facing,
-                &name::PieceId,
-                &name::PieceName,
+                Option<&name::PieceId>,
+                Option<&name::PieceName>,
             )>,
                   mut next_state: ResMut<NextState<SimulationState>>| {
                 trace::play_from_file(

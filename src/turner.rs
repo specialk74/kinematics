@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
+use crate::editor::Tool;
 use crate::engagement::{Engaged, in_the_same_cell};
-use crate::piece::{self, Arrow, PieceShapes};
+use crate::piece::{self, PieceShapes};
 use crate::switch::{Look, Switch};
 
 /// Fa svoltare il carrier a destra rispetto alla sua marcia: chi va a sinistra
@@ -77,12 +78,15 @@ fn attach_turner_visuals(
     turners: Query<(Entity, &Turner, &Switch), Without<Mesh2d>>,
 ) {
     for (entity, turner, switch) in turners.iter() {
-        piece::dress(
+        let (shape, arrow) = piece::dressing(&shapes, Tool::Turner);
+
+        piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
+            shape,
             material_for(&assets, turner, *switch),
-            Arrow::Straight,
+            arrow,
         );
     }
 }

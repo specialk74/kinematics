@@ -53,6 +53,9 @@ fn prefix(tool: Tool) -> &'static str {
         Tool::Antenna => "antenna",
         Tool::TubeSensor => "sens-tubo",
         Tool::CarrierSensor => "sens-carrier",
+        // I pezzi passivi non ricevono un nome: questa radice non viene mai
+        // usata, ma il match deve restare esaustivo.
+        Tool::Guide => "guida",
     }
 }
 

@@ -47,6 +47,8 @@ pub enum Tool {
     TubeSensor,
     /// La stessa cosa, ma conta qualunque carrier.
     CarrierSensor,
+    /// Un tratto di guida: disegno e basta, non tocca il flusso.
+    Guide,
 }
 
 impl Tool {
@@ -62,6 +64,7 @@ impl Tool {
             Tool::Antenna => "Antenna",
             Tool::TubeSensor => "Sens. tubo",
             Tool::CarrierSensor => "Sens. carrier",
+            Tool::Guide => "Guida",
         }
     }
 
@@ -74,10 +77,18 @@ impl Tool {
 
     pub fn layer(self) -> Layer {
         match self {
+            Tool::Guide => Layer::Rail,
             Tool::Antenna => Layer::Under,
             Tool::TubeSensor | Tool::CarrierSensor => Layer::Side,
             _ => Layer::Track,
         }
+    }
+
+    /// Vero se l'oggetto e' solo disegno: niente stato da comandare, niente
+    /// nome da dire a mqtt, e quindi niente da mostrare nell'elenco dei nomi
+    /// ne' da scrivere nelle registrazioni. Un impianto ne contiene molti.
+    pub fn is_passive(self) -> bool {
+        self == Tool::Guide
     }
 }
 
@@ -94,6 +105,8 @@ pub enum Layer {
     Side,
     /// Sotto la linea: ci passano sopra sia i carrier sia gli oggetti.
     Under,
+    /// Il fondo: i tratti di guida, che stanno sotto a tutto il resto.
+    Rail,
 }
 
 impl Layer {
@@ -104,6 +117,7 @@ impl Layer {
             Layer::Track => 1.0,
             Layer::Side => 0.9,
             Layer::Under => -1.0,
+            Layer::Rail => -2.0,
         }
     }
 }
@@ -154,11 +168,12 @@ where
     }
 
     // Nel resto della cella risponde l'antenna, se c'e'; altrimenti si torna a
-    // quello che la cella contiene.
+    // quello che la cella contiene, guida compresa - che sta sotto a tutti.
     named(
         in_cell(Layer::Under)
             .or(in_cell(Layer::Track))
-            .or(in_cell(Layer::Side)),
+            .or(in_cell(Layer::Side))
+            .or(in_cell(Layer::Rail)),
     )
 }
 
@@ -201,7 +216,7 @@ impl EditorTool {
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 13] = [
+const MODES: [EditorTool; 14] = [
     EditorTool::Pan,
     EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
@@ -214,6 +229,7 @@ const MODES: [EditorTool; 13] = [
     EditorTool::Place(Tool::Antenna),
     EditorTool::Place(Tool::TubeSensor),
     EditorTool::Place(Tool::CarrierSensor),
+    EditorTool::Place(Tool::Guide),
     EditorTool::GateWithAntenna,
 ];
 
@@ -322,9 +338,17 @@ struct SaveNotice(Option<(bool, Timer)>);
 #[derive(Resource, Default)]
 pub struct DraggedPiece(pub Option<Entity>);
 
-/// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse ora.
+/// Come sara' girato il prossimo oggetto piazzato. Resta com'e' fra un
+/// piazzamento e l'altro: chi sta costruendo una fila di guide orizzontali le
+/// vuole tutte orizzontali, e rigirarle una per una sarebbe un lavoro inutile.
+#[derive(Resource, Default)]
+pub struct PendingFacing(pub Facing);
+
+/// Sagoma semitrasparente che mostra dove finirebbe l'oggetto se si cliccasse
+/// ora, e come sarebbe girato. Porta con se' il tipo che sta mostrando: se
+/// cambia, la sagoma va rifatta.
 #[derive(Component)]
-struct Ghost;
+struct Ghost(Tool);
 
 #[derive(Resource)]
 struct GhostMaterial(Handle<ColorMaterial>);
@@ -382,6 +406,7 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
+            .init_resource::<PendingFacing>()
             .init_resource::<SaveNotice>()
             .init_resource::<DraggedPiece>()
             .add_systems(
@@ -601,7 +626,8 @@ fn update_ghost(
     shapes: Res<PieceShapes>,
     ui_interactions: Query<&Interaction>,
     state: Res<State<SimulationState>>,
-    mut ghost: Query<(&mut Transform, &mut Visibility, &mut Mesh2d), With<Ghost>>,
+    pending: Res<PendingFacing>,
+    mut ghost: Query<(Entity, &Ghost, &mut Transform, &mut Visibility)>,
 ) {
     // Niente anteprima in modo "Sposta" ne' durante una riproduzione: in
     // entrambi i casi il clic non piazzerebbe nulla, e mostrare dove finirebbe
@@ -618,40 +644,45 @@ fn update_ghost(
     };
 
     let Some((tool, cell)) = target else {
-        if let Ok((_, mut visibility, _)) = ghost.single_mut() {
+        if let Ok((_, _, _, mut visibility)) = ghost.single_mut() {
             *visibility = Visibility::Hidden;
         }
         return;
     };
 
-    // Gli oggetti di linea sono quadrati tutti uguali, quindi per loro
-    // l'anteprima dice dove finira' il prossimo e non che aspetto avra'.
-    // L'antenna e' un cerchio, ed e' l'unica forma diversa: mostrarla quadrata
-    // sarebbe una promessa sbagliata.
-    let mesh = match tool {
-        Tool::Antenna => piece::circle(&shapes),
-        Tool::Gate | Tool::TubeSensor | Tool::CarrierSensor => piece::bar(&shapes),
-        _ => piece::square(&shapes),
-    };
-    let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z));
+    // L'anteprima e' l'oggetto vero, in trasparenza: stessa figura, stessa
+    // freccia, stesso orientamento. Mostrarne uno diverso da quello che poi
+    // compare e' peggio che non mostrarlo affatto.
+    let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z))
+        .with_rotation(pending.0.0.rotation());
 
     match ghost.single_mut() {
-        Ok((mut ghost_transform, mut visibility, mut ghost_mesh)) => {
+        // La figura dipende dal tipo: finche' resta lo stesso basta spostare la
+        // sagoma, che e' quello che succede a ogni movimento del mouse.
+        Ok((entity, showing, mut ghost_transform, mut visibility)) if showing.0 == tool => {
             *ghost_transform = transform;
             *visibility = Visibility::Visible;
-            if ghost_mesh.0 != mesh {
-                ghost_mesh.0 = mesh;
-            }
+            let _ = entity;
         }
-        // Nasce al primo frame utile: negli Startup l'ordine fra i setup degli
-        // asset non e' garantito, qui invece ci sono di sicuro.
-        Err(_) => {
-            commands.spawn((
-                Mesh2d(mesh),
-                MeshMaterial2d(ghost_material.0.clone()),
-                transform,
-                Ghost,
-            ));
+        // Tipo cambiato, o prima sagoma della sessione: si rifa'.
+        outcome => {
+            if let Ok((entity, _, _, _)) = outcome {
+                commands.entity(entity).despawn();
+            }
+
+            let (shape, arrow) = piece::dressing(&shapes, tool);
+            let ghost_entity = commands
+                .spawn((transform, Visibility::Visible, Ghost(tool)))
+                .id();
+
+            piece::dress_shape(
+                &mut commands,
+                ghost_entity,
+                &shapes,
+                shape,
+                ghost_material.0.clone(),
+                arrow,
+            );
         }
     }
 }
@@ -696,6 +727,7 @@ fn place_selected_tool(
     placed: Query<(Entity, &Placed, &Facing)>,
     ui_interactions: Query<&Interaction>,
     selected: Res<SelectedTool>,
+    pending: Res<PendingFacing>,
     identities: Query<(&PieceId, &PieceName)>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -721,15 +753,6 @@ fn place_selected_tool(
         return;
     }
 
-    // Chi si aggiunge a una cella gia' abitata si mette d'accordo con
-    // l'oggetto di linea che ci trova: l'antenna guarda dalla sua stessa parte,
-    // il sensore di traverso. Poi il tasto destro gira tutta la cella insieme,
-    // quindi il rapporto non si perde piu'.
-    let host = placed
-        .iter()
-        .find(|(_, placed, _)| placed.cell == cell && placed.tool.layer() == Layer::Track)
-        .map(|(_, _, facing)| *facing);
-
     for tool in selected.0.places() {
         // Si guarda solo il proprio piano: un'antenna si appoggia sotto un
         // oggetto gia' piazzato senza portarlo via, e viceversa.
@@ -750,11 +773,10 @@ fn place_selected_tool(
             commands.entity(entity).despawn();
         }
 
-        let facing = match (tool.layer(), host) {
-            (Layer::Side, Some(host)) => Facing(host.0.turn_right()),
-            (_, Some(host)) => host,
-            (_, None) => Facing::default(),
-        };
+        // L'orientamento e' quello scelto prima di piazzare, quello che
+        // l'anteprima sta mostrando: niente correzioni automatiche, altrimenti
+        // l'anteprima direbbe una cosa e il piazzamento ne farebbe un'altra.
+        let facing = pending.0;
 
         // Ogni oggetto nasce gia' identificato: il numero per le registrazioni,
         // il nome per mqtt. Il nome si cambia dal pannello, ma non resta mai
@@ -1010,17 +1032,25 @@ fn show_save_outcome(
     }
 }
 
-/// Tasto destro su un oggetto: lo gira di un quarto di giro. E' la freccia a
-/// dire dove finisce il carrier, quindi girarla cambia davvero il percorso.
+/// Tasto destro. Con uno strumento in mano gira l'oggetto che si sta per
+/// piazzare - cioe' l'anteprima - e l'orientamento resta per i successivi. In
+/// modo Sposta gira invece quello che c'e' gia' nella cella puntata.
 fn rotate_piece(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     ui_interactions: Query<&Interaction>,
+    selected: Res<SelectedTool>,
+    mut pending: ResMut<PendingFacing>,
     placed: Query<(Entity, &Placed)>,
     mut facings: Query<&mut Facing>,
 ) {
     if !mouse.just_pressed(MouseButton::Right) {
+        return;
+    }
+
+    if selected.0 != EditorTool::Pan && selected.0 != EditorTool::Erase {
+        pending.0.0 = pending.0.0.turn_right();
         return;
     }
 
@@ -1113,7 +1143,7 @@ fn handle_layout_buttons(
     mut commands: Commands,
     buttons: Query<(&Interaction, &LayoutButton), Changed<Interaction>>,
     placed: Query<(Entity, &Placed)>,
-    pieces: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+    pieces: Query<(&Placed, &Facing, Option<&PieceId>, Option<&PieceName>)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
     mut notice: ResMut<SaveNotice>,
