@@ -13,6 +13,7 @@ mod cli;
 mod despawner;
 mod divert;
 mod editor;
+mod engagement;
 mod gate;
 mod geometry;
 mod grid;
@@ -25,19 +26,20 @@ mod source;
 mod trace;
 mod turner;
 
-use antenna::{AntennaPlugin, AntennaVisualsPlugin};
+use antenna::AntennaVisualsPlugin;
 use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
 use cli::Options;
 use despawner::{DespawnerPlugin, DespawnerVisualsPlugin};
 use divert::DivertVisualsPlugin;
 use editor::EditorPlugin;
+use engagement::EngagementPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
 use piece::PiecePlugin;
 use reverser::ReverserVisualsPlugin;
-use sensor::{SensorPlugin, SensorVisualsPlugin};
+use sensor::SensorVisualsPlugin;
 use simulation::{SimulationControlsPlugin, SimulationPlugin, SimulationState};
 use source::{SourcePlugin, SourceVisualsPlugin};
 use trace::{Replay, TracePlugin, TraceVisualsPlugin};
@@ -123,8 +125,9 @@ fn main() {
         // Anche senza finestra: registrare non ha bisogno di guardare, e i
         // sensori devono vedere passare i carrier comunque.
         TracePlugin,
-        SensorPlugin,
-        AntennaPlugin,
+        // Sensori, antenne e deviatori si accorgono dei carrier anche senza
+        // finestra: quello stato servira' a mqtt, non solo al colore.
+        EngagementPlugin,
     ))
     .run();
 }

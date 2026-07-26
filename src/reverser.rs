@@ -2,7 +2,8 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
-use crate::carrier::{Heading, Motion};
+use crate::carrier::{Carrier, Heading, Motion};
+use crate::engagement::{Engaged, in_the_same_cell};
 use crate::grid::GRID_STEP;
 use crate::piece::{self, Arrow, PieceShapes};
 
@@ -20,6 +21,8 @@ pub const TURN_RADIUS: f32 = GRID_STEP / 2.0;
 #[derive(Component)]
 pub struct Reverser {
     pub active: bool,
+    /// Se in questo istante ha un carrier fra le mani. Lo scrive la simulazione, lo legge il colore.
+    pub engaged: bool,
 }
 
 impl Reverser {
@@ -38,6 +41,27 @@ impl Reverser {
     }
 }
 
+impl Engaged for Reverser {
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn engaged(&self) -> bool {
+        self.engaged
+    }
+
+    fn set_engaged(&mut self, engaged: bool) {
+        self.engaged = engaged;
+    }
+
+    fn reaches(&self, at: Vec3, _facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
+        // Per ora: "ho un carrier nella mia cella". La condizione vera, quella
+        // che dira' a mqtt "sto agendo su questo carrier", e' diversa per
+        // ciascuno e verra' quando serviranno i messaggi e non il colore.
+        in_the_same_cell(at, carrier_at)
+    }
+}
+
 pub struct ReverserVisualsPlugin;
 
 impl Plugin for ReverserVisualsPlugin {
@@ -50,6 +74,8 @@ impl Plugin for ReverserVisualsPlugin {
 #[derive(Resource)]
 pub struct ReverserAssets {
     active_material: Handle<ColorMaterial>,
+    /// Lo stesso colore schiarito, per quando c'e' un carrier in mezzo.
+    busy_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
@@ -57,6 +83,7 @@ fn setup_reverser_assets(mut commands: Commands, mut materials: ResMut<Assets<Co
     commands.insert_resource(ReverserAssets {
         // Rombo: distinto da triangoli, quadrati, sbarre e cerchi.
         active_material: materials.add(Color::srgb(0.65, 0.30, 0.95)),
+        busy_material: materials.add(Color::srgb(0.85, 0.68, 1.0)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
 }
@@ -65,16 +92,19 @@ pub fn spawn_reverser(commands: &mut Commands, position: Vec3) -> Entity {
     commands
         .spawn((
             Transform::from_translation(position),
-            Reverser { active: true },
+            Reverser {
+                active: true,
+                engaged: false,
+            },
         ))
         .id()
 }
 
 fn material_for(assets: &ReverserAssets, reverser: &Reverser) -> Handle<ColorMaterial> {
-    if reverser.active {
-        assets.active_material.clone()
-    } else {
-        assets.idle_material.clone()
+    match (reverser.active, reverser.engaged) {
+        (false, _) => assets.idle_material.clone(),
+        (true, false) => assets.active_material.clone(),
+        (true, true) => assets.busy_material.clone(),
     }
 }
 
@@ -109,7 +139,10 @@ mod tests {
     use super::*;
 
     fn reverser() -> Reverser {
-        Reverser { active: true }
+        Reverser {
+            active: true,
+            engaged: false,
+        }
     }
 
     /// Il caso di partenza: chi va a sinistra e curva in antiorario esce verso

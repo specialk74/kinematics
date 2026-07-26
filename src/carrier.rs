@@ -665,6 +665,7 @@ mod tests {
         Divert {
             kind: DivertKind::Atr,
             active: true,
+            engaged: false,
         }
     }
 
@@ -717,6 +718,7 @@ mod tests {
         let divert = Divert {
             kind: DivertKind::Divert,
             active: true,
+            engaged: false,
         };
         let deviators = [
             (&divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
@@ -797,6 +799,7 @@ mod tests {
         let off_divert = Divert {
             kind: DivertKind::Divert,
             active: false,
+            engaged: false,
         };
         let live_atr = atr();
         let carrier = carrier(CarrierType::WithTube);
@@ -827,6 +830,7 @@ mod tests {
         let divert = Divert {
             kind: DivertKind::Divert,
             active: true,
+            engaged: false,
         };
         let divert_position = Vec3::ZERO;
         let diverts = [(&divert, Heading::Right, divert_position)];
@@ -875,6 +879,7 @@ mod tests {
         let divert = Divert {
             kind: DivertKind::Divert,
             active: true,
+            engaged: false,
         };
         let diverts = [
             (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
@@ -900,7 +905,10 @@ mod tests {
     /// Chi va a sinistra svolta verso l'alto: la destra e' quella del carrier.
     #[test]
     fn a_turner_sends_a_leftward_carrier_upwards() {
-        let turner = Turner { active: true };
+        let turner = Turner {
+            active: true,
+            engaged: false,
+        };
         let turner_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
@@ -928,6 +936,7 @@ mod tests {
         let divert = Divert {
             kind: DivertKind::Divert,
             active: true,
+            engaged: false,
         };
         let diverts = [
             (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
@@ -959,6 +968,7 @@ mod tests {
         let off_atr = Divert {
             kind: DivertKind::Atr,
             active: false,
+            engaged: false,
         };
         let atr_position = Vec3::ZERO;
         let diverts = [(&off_atr, Heading::Up, atr_position)];
@@ -1085,7 +1095,10 @@ mod tests {
     /// dietro, non fermarsi contro di lui.
     #[test]
     fn a_queue_of_carriers_flows_through_a_turner() {
-        let turner = Turner { active: true };
+        let turner = Turner {
+            active: true,
+            engaged: false,
+        };
         let turners = [(&turner, Heading::Up, Vec3::ZERO)];
         let track = Track {
             diverts: &[],
@@ -1139,7 +1152,10 @@ mod tests {
     /// girato verso destra manda a destra chiunque ci passi.
     #[test]
     fn the_arrow_decides_the_new_heading() {
-        let turner = Turner { active: true };
+        let turner = Turner {
+            active: true,
+            engaged: false,
+        };
         let turner_position = Vec3::ZERO;
         let track = Track {
             diverts: &[],
@@ -1174,7 +1190,10 @@ mod tests {
 
     #[test]
     fn a_switched_off_turner_lets_the_carrier_through() {
-        let turner = Turner { active: false };
+        let turner = Turner {
+            active: false,
+            engaged: false,
+        };
         let track = Track {
             diverts: &[],
             turners: &[(&turner, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0))],
@@ -1197,7 +1216,10 @@ mod tests {
     /// diversa da quella di andata, senza mai risalire sopra di essa.
     #[test]
     fn the_reverser_sends_the_carrier_back_on_another_line() {
-        let reverser = Reverser { active: true };
+        let reverser = Reverser {
+            active: true,
+            engaged: false,
+        };
         let reverser_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
@@ -1233,7 +1255,10 @@ mod tests {
     /// su una colonna diversa da quella di salita.
     #[test]
     fn the_reverser_also_turns_a_rising_carrier() {
-        let reverser = Reverser { active: true };
+        let reverser = Reverser {
+            active: true,
+            engaged: false,
+        };
         let reverser_position = Vec3::new(0.0, 0.0, 0.0);
         let track = Track {
             diverts: &[],
@@ -1258,7 +1283,10 @@ mod tests {
 
     #[test]
     fn a_switched_off_reverser_lets_the_carrier_through() {
-        let reverser = Reverser { active: false };
+        let reverser = Reverser {
+            active: false,
+            engaged: false,
+        };
         let track = Track {
             diverts: &[],
             turners: &[],

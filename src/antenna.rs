@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
-use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, Facing, PieceShapes};
+use crate::engagement::Engaged;
+use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes};
 
 /// Antenna di lettura: sta sotto la linea e guarda passare i carrier sopra di
 /// se'. Per ora e' solo un punto sulla mappa e non tocca il flusso in nessun
@@ -34,29 +35,22 @@ pub fn over(eye: Vec3, carrier: Vec3) -> bool {
     eye.truncate().distance(carrier.truncate()) <= ANTENNA_RADIUS
 }
 
-/// La lettura vera e propria, che serve anche senza finestra.
-pub struct AntennaPlugin;
-
-impl Plugin for AntennaPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Update, sense_carriers);
+impl Engaged for Antenna {
+    fn active(&self) -> bool {
+        self.active
     }
-}
 
-fn sense_carriers(
-    carriers: Query<&Transform, With<Carrier>>,
-    antennas: Query<(&mut Antenna, &Facing, &Transform), Without<Carrier>>,
-) {
-    for (mut antenna, facing, transform) in antennas {
-        let eye = eye(transform.translation, facing.0);
-        let seeing = antenna.active
-            && carriers
-                .iter()
-                .any(|carrier| over(eye, carrier.translation));
+    fn engaged(&self) -> bool {
+        self.seeing
+    }
 
-        if antenna.seeing != seeing {
-            antenna.seeing = seeing;
-        }
+    fn set_engaged(&mut self, engaged: bool) {
+        self.seeing = engaged;
+    }
+
+    fn reaches(&self, at: Vec3, facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
+        // L'antenna legge chiunque le stia sopra: il tubo non la riguarda.
+        over(eye(at, facing), carrier_at)
     }
 }
 

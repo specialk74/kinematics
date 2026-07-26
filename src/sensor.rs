@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use crate::carrier::{COLLAR_RADIUS, Carrier, CarrierType, Heading};
+use crate::engagement::Engaged;
 use crate::grid::GRID_STEP;
-use crate::piece::{self, Arrow, Facing, PieceShapes};
+use crate::piece::{self, Arrow, PieceShapes};
 
 /// Che cosa guarda il sensore. E' l'unica differenza fra i due: la zona che
 /// sorvegliano e il modo in cui si accendono sono gli stessi.
@@ -35,6 +36,24 @@ impl Sensor {
     }
 }
 
+impl Engaged for Sensor {
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn engaged(&self) -> bool {
+        self.seeing
+    }
+
+    fn set_engaged(&mut self, engaged: bool) {
+        self.seeing = engaged;
+    }
+
+    fn reaches(&self, at: Vec3, facing: Heading, carrier: &Carrier, carrier_at: Vec3) -> bool {
+        self.watches(carrier.kind) && in_beam(at, facing, carrier_at)
+    }
+}
+
 /// Vero se il carrier sta interrompendo il fascio del sensore. Il fascio e' una
 /// riga sottile che dalla parete taglia la corsia di traverso, come una
 /// fotocellula vera: non e' il contatto con la sbarra, che non avverrebbe mai
@@ -47,37 +66,6 @@ pub fn in_beam(sensor: Vec3, facing: Heading, carrier: Vec3) -> bool {
     let local = facing.rotation().inverse() * (carrier - sensor);
 
     local.x.abs() <= COLLAR_RADIUS && local.y.abs() <= GRID_STEP / 2.0
-}
-
-/// La parte che conta anche senza interfaccia: chi vede chi.
-pub struct SensorPlugin;
-
-impl Plugin for SensorPlugin {
-    fn build(&self, app: &mut App) {
-        // Senza `run_if`: anche in pausa e durante una riproduzione un carrier
-        // fermo davanti al sensore e' comunque davanti al sensore.
-        app.add_systems(Update, sense_carriers);
-    }
-}
-
-fn sense_carriers(
-    carriers: Query<(&Carrier, &Transform)>,
-    sensors: Query<(&mut Sensor, &Facing, &Transform), Without<Carrier>>,
-) {
-    for (mut sensor, facing, transform) in sensors {
-        let seeing = sensor.active
-            && carriers.iter().any(|(carrier, position)| {
-                sensor.watches(carrier.kind)
-                    && in_beam(transform.translation, facing.0, position.translation)
-            });
-
-        // Si scrive solo quando cambia davvero: il colore del bordo si aggiorna
-        // guardando `Changed<Sensor>`, e riscriverlo ogni frame lo sveglierebbe
-        // per niente a ogni frame.
-        if sensor.seeing != seeing {
-            sensor.seeing = seeing;
-        }
-    }
 }
 
 pub struct SensorVisualsPlugin;
@@ -169,13 +157,14 @@ fn refresh_sensor_look(
 mod tests {
     use super::*;
     use crate::carrier::{CARRIER_SIZE, Motion};
+    use crate::piece::Facing;
 
     /// Fa girare il sistema vero su una scena minima: un sensore e un carrier
     /// nella stessa cella. E' l'unico modo di verificare quello che conta
     /// davvero, cioe' che il sensore si accenda per chi deve e per nessun altro.
     fn sees(kind: SensorKind, active: bool, passing: CarrierType) -> bool {
         let mut app = App::new();
-        app.add_plugins(SensorPlugin);
+        app.add_plugins(crate::engagement::EngagementPlugin);
 
         let sensor = app
             .world_mut()

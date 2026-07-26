@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
-use crate::carrier::Heading;
+use crate::carrier::{Carrier, Heading};
+use crate::engagement::{Engaged, in_the_same_cell};
 use crate::piece::{self, Arrow, PieceShapes};
 
 /// Dislivello fra la corsia principale e quella deviata.
@@ -26,6 +27,9 @@ pub enum DivertKind {
 pub struct Divert {
     pub kind: DivertKind,
     pub active: bool,
+    /// Se in questo istante ha un carrier nella propria cella. Lo scrive la
+    /// simulazione, lo legge il colore.
+    pub engaged: bool,
 }
 
 impl Divert {
@@ -100,6 +104,28 @@ impl Divert {
 
 /// Come il gate: la deviazione la applica il movimento dei carrier, qui resta
 /// solo l'aspetto.
+
+impl Engaged for Divert {
+    fn active(&self) -> bool {
+        self.active
+    }
+
+    fn engaged(&self) -> bool {
+        self.engaged
+    }
+
+    fn set_engaged(&mut self, engaged: bool) {
+        self.engaged = engaged;
+    }
+
+    fn reaches(&self, at: Vec3, _facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
+        // Per ora: "ho un carrier nella mia cella". La condizione vera, quella
+        // che dira' a mqtt "sto agendo su questo carrier", e' diversa per
+        // ciascuno e verra' quando serviranno i messaggi e non il colore.
+        in_the_same_cell(at, carrier_at)
+    }
+}
+
 pub struct DivertVisualsPlugin;
 
 impl Plugin for DivertVisualsPlugin {
@@ -113,6 +139,9 @@ impl Plugin for DivertVisualsPlugin {
 pub struct DivertAssets {
     divert_material: Handle<ColorMaterial>,
     atr_material: Handle<ColorMaterial>,
+    /// Gli stessi due colori schiariti, per quando c'e' un carrier in mezzo.
+    divert_busy_material: Handle<ColorMaterial>,
+    atr_busy_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
 
@@ -122,6 +151,8 @@ fn setup_divert_assets(mut commands: Commands, mut materials: ResMut<Assets<Colo
         // Con l'orientamento i due si comportano allo stesso modo: il colore e'
         // quello che resta a distinguerli a colpo d'occhio.
         atr_material: materials.add(Color::srgb(0.85, 0.40, 0.05)),
+        divert_busy_material: materials.add(Color::srgb(1.0, 0.85, 0.55)),
+        atr_busy_material: materials.add(Color::srgb(1.0, 0.72, 0.42)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
 }
@@ -131,16 +162,22 @@ pub fn spawn_divert(commands: &mut Commands, position: Vec3, kind: DivertKind) -
     commands
         .spawn((
             Transform::from_translation(position),
-            Divert { kind, active: true },
+            Divert {
+                kind,
+                active: true,
+                engaged: false,
+            },
         ))
         .id()
 }
 
 fn material_for(assets: &DivertAssets, divert: &Divert) -> Handle<ColorMaterial> {
-    match (divert.active, divert.kind) {
-        (false, _) => assets.idle_material.clone(),
-        (true, DivertKind::Divert) => assets.divert_material.clone(),
-        (true, DivertKind::Atr) => assets.atr_material.clone(),
+    match (divert.active, divert.kind, divert.engaged) {
+        (false, _, _) => assets.idle_material.clone(),
+        (true, DivertKind::Divert, false) => assets.divert_material.clone(),
+        (true, DivertKind::Divert, true) => assets.divert_busy_material.clone(),
+        (true, DivertKind::Atr, false) => assets.atr_material.clone(),
+        (true, DivertKind::Atr, true) => assets.atr_busy_material.clone(),
     }
 }
 
@@ -178,6 +215,7 @@ mod tests {
         Divert {
             kind: DivertKind::Divert,
             active: true,
+            engaged: false,
         }
     }
 
@@ -285,6 +323,7 @@ mod tests {
         let mut atr = Divert {
             kind: DivertKind::Atr,
             active: false,
+            engaged: false,
         };
 
         assert!(atr.is_blocking(), "da spento l'ATR sbarra");
@@ -314,6 +353,7 @@ mod tests {
         let mut off = Divert {
             kind: DivertKind::Atr,
             active: false,
+            engaged: false,
         };
         let position = Vec3::ZERO;
         let arrow = Heading::Up;
