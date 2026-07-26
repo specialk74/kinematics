@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Blocker, Heading};
-use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, Facing, PieceShapes};
+use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
 /// quando e' spenta li lascia passare. Se e' fuori dal flusso non blocca nessuno,

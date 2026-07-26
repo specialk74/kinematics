@@ -13,6 +13,7 @@ use crate::editor::Tool;
 use crate::gate::Gate;
 use crate::piece::Facing;
 use crate::reverser::Reverser;
+use crate::sensor::Sensor;
 use crate::source::CarrierSource;
 use crate::turner::Turner;
 
@@ -92,6 +93,7 @@ pub struct Switches<'w, 's> {
     turners: Query<'w, 's, &'static mut Turner>,
     reversers: Query<'w, 's, &'static mut Reverser>,
     antennas: Query<'w, 's, &'static mut Antenna>,
+    sensors: Query<'w, 's, &'static mut Sensor>,
 }
 
 impl Switches<'_, '_> {
@@ -107,8 +109,10 @@ impl Switches<'_, '_> {
             Some(turner.active)
         } else if let Ok(reverser) = self.reversers.get(entity) {
             Some(reverser.active)
+        } else if let Ok(antenna) = self.antennas.get(entity) {
+            Some(antenna.active)
         } else {
-            self.antennas.get(entity).ok().map(|a| a.active)
+            self.sensors.get(entity).ok().map(|s| s.active)
         }
     }
 
@@ -125,6 +129,8 @@ impl Switches<'_, '_> {
             reverser.active = active;
         } else if let Ok(mut antenna) = self.antennas.get_mut(entity) {
             antenna.active = active;
+        } else if let Ok(mut sensor) = self.sensors.get_mut(entity) {
+            sensor.active = active;
         }
     }
 
@@ -162,6 +168,12 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: F
         Tool::Turner => crate::turner::spawn_turner(commands, position),
         Tool::Reverser => crate::reverser::spawn_reverser(commands, position),
         Tool::Antenna => crate::antenna::spawn_antenna(commands, position),
+        Tool::TubeSensor => {
+            crate::sensor::spawn_sensor(commands, position, crate::sensor::SensorKind::Tube)
+        }
+        Tool::CarrierSensor => {
+            crate::sensor::spawn_sensor(commands, position, crate::sensor::SensorKind::Carrier)
+        }
     };
 
     commands

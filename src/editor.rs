@@ -34,6 +34,10 @@ pub enum Tool {
     Reverser,
     /// Lettore sotto la linea. Non tocca il flusso: guarda e basta.
     Antenna,
+    /// Fotocellula su una parete della cella: vede passare le provette.
+    TubeSensor,
+    /// La stessa cosa, ma conta qualunque carrier.
+    CarrierSensor,
 }
 
 impl Tool {
@@ -47,12 +51,15 @@ impl Tool {
             Tool::Turner => "Svolta",
             Tool::Reverser => "Inversione",
             Tool::Antenna => "Antenna",
+            Tool::TubeSensor => "Sens. tubo",
+            Tool::CarrierSensor => "Sens. carrier",
         }
     }
 
     pub fn layer(self) -> Layer {
         match self {
             Tool::Antenna => Layer::Under,
+            Tool::TubeSensor | Tool::CarrierSensor => Layer::Side,
             _ => Layer::Track,
         }
     }
@@ -66,6 +73,9 @@ impl Tool {
 pub enum Layer {
     /// Sulla linea: sorgenti, gate, deviatori, uscite.
     Track,
+    /// Su una parete della cella: i sensori. Uno solo per cella, ma convive con
+    /// l'oggetto di linea, perche' sta su un lato che quello lascia libero.
+    Side,
     /// Sotto la linea: ci passano sopra sia i carrier sia gli oggetti.
     Under,
 }
@@ -76,6 +86,7 @@ impl Layer {
     pub fn z(self) -> f32 {
         match self {
             Layer::Track => 1.0,
+            Layer::Side => 0.9,
             Layer::Under => -1.0,
         }
     }
@@ -110,16 +121,25 @@ where
         found.map(|(entity, placed, _)| (entity, placed.tool))
     };
 
-    let track = in_cell(Layer::Track);
-    let on_the_figure = track.is_some_and(|(_, placed, facing)| {
-        piece::covers(placed.tool, *facing, grid::cell_center(cell), point)
+    // Prima chi ha una figura sotto il puntatore: fra l'oggetto di linea e il
+    // sensore sulla parete non c'e' sovrapposizione, quindi al piu' uno risponde.
+    let on_the_figure = objects().find(|(_, placed, facing)| {
+        placed.cell == cell
+            && placed.tool.layer() != Layer::Under
+            && piece::covers(placed.tool, **facing, grid::cell_center(cell), point)
     });
 
-    if on_the_figure {
-        return named(track);
+    if on_the_figure.is_some() {
+        return named(on_the_figure);
     }
 
-    named(in_cell(Layer::Under).or(track))
+    // Nel resto della cella risponde l'antenna, se c'e'; altrimenti si torna a
+    // quello che la cella contiene.
+    named(
+        in_cell(Layer::Under)
+            .or(in_cell(Layer::Track))
+            .or(in_cell(Layer::Side)),
+    )
 }
 
 /// L'oggetto in cima alla cella: quello di linea se c'e', altrimenti l'antenna
@@ -173,7 +193,7 @@ impl EditorTool {
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 11] = [
+const MODES: [EditorTool; 13] = [
     EditorTool::Pan,
     EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
@@ -184,6 +204,8 @@ const MODES: [EditorTool; 11] = [
     EditorTool::Place(Tool::Turner),
     EditorTool::Place(Tool::Reverser),
     EditorTool::Place(Tool::Antenna),
+    EditorTool::Place(Tool::TubeSensor),
+    EditorTool::Place(Tool::CarrierSensor),
     EditorTool::GateWithAntenna,
 ];
 
@@ -347,7 +369,7 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
                 height: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(8.0)),
-                row_gap: Val::Px(8.0),
+                row_gap: Val::Px(6.0),
                 ..default()
             },
             BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
@@ -426,7 +448,7 @@ fn button_node() -> (Button, Node) {
         Button,
         Node {
             width: Val::Percent(100.0),
-            height: Val::Px(40.0),
+            height: Val::Px(34.0),
             flex_shrink: 0.0,
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
@@ -524,7 +546,7 @@ fn update_ghost(
     // sarebbe una promessa sbagliata.
     let mesh = match tool {
         Tool::Antenna => piece::circle(&shapes),
-        Tool::Gate => piece::bar(&shapes),
+        Tool::Gate | Tool::TubeSensor | Tool::CarrierSensor => piece::bar(&shapes),
         _ => piece::square(&shapes),
     };
     let transform = Transform::from_translation(grid::cell_center(cell).extend(GHOST_Z));
@@ -615,6 +637,15 @@ fn place_selected_tool(
         return;
     }
 
+    // Chi si aggiunge a una cella gia' abitata si mette d'accordo con
+    // l'oggetto di linea che ci trova: l'antenna guarda dalla sua stessa parte,
+    // il sensore di traverso. Poi il tasto destro gira tutta la cella insieme,
+    // quindi il rapporto non si perde piu'.
+    let host = placed
+        .iter()
+        .find(|(_, placed, _)| placed.cell == cell && placed.tool.layer() == Layer::Track)
+        .map(|(_, _, facing)| *facing);
+
     for tool in selected.0.places() {
         // Si guarda solo il proprio piano: un'antenna si appoggia sotto un
         // oggetto gia' piazzato senza portarlo via, e viceversa.
@@ -640,7 +671,13 @@ fn place_selected_tool(
             commands.entity(entity).despawn();
         }
 
-        place_in_cell(&mut commands, tool, cell, Facing::default());
+        let facing = match (tool.layer(), host) {
+            (Layer::Side, Some(host)) => Facing(host.0.turn_right()),
+            (_, Some(host)) => host,
+            (_, None) => Facing::default(),
+        };
+
+        place_in_cell(&mut commands, tool, cell, facing);
     }
 }
 

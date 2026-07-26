@@ -53,6 +53,10 @@ pub struct TraceFrame {
     pub carriers: Vec<TracedCarrier>,
     /// Gli oggetti di linea, per cella.
     pub switches: Vec<((i32, i32), bool)>,
+    /// I sensori sulle pareti, sempre per cella. Assente nelle registrazioni
+    /// fatte prima che esistessero.
+    #[serde(default)]
+    pub side: Vec<((i32, i32), bool)>,
     /// Quelli del piano di sotto, sempre per cella. Stanno in un elenco a parte
     /// perche' un'antenna puo' condividere la cella con un oggetto di linea: in
     /// un elenco solo le due voci avrebbero la stessa chiave e in riproduzione
@@ -453,6 +457,7 @@ fn record_frames(
             })
             .collect(),
         switches: switches_on(Layer::Track, &placed, &switches),
+        side: switches_on(Layer::Side, &placed, &switches),
         under: switches_on(Layer::Under, &placed, &switches),
     };
 
@@ -689,6 +694,7 @@ fn play_frames(
     // che si vede. I due piani si ripristinano separatamente: e' l'unico modo di
     // non confondere un'antenna con l'oggetto che le sta sopra.
     restore(Layer::Track, &frame.switches, &placed, &mut switches);
+    restore(Layer::Side, &frame.side, &placed, &mut switches);
     restore(Layer::Under, &frame.under, &placed, &mut switches);
 }
 
@@ -805,6 +811,7 @@ mod tests {
                         at: (10.0, -20.0),
                     }],
                     switches: vec![((3, 0), true)],
+                    side: vec![((3, 0), true)],
                     // Un'antenna accesa sotto quello stesso gate.
                     under: vec![((3, 0), true)],
                 },
@@ -819,6 +826,7 @@ mod tests {
                     // diversi, ed e' il caso che un elenco solo non saprebbe
                     // raccontare.
                     switches: vec![((3, 0), false)],
+                    side: vec![((3, 0), true)],
                     under: vec![((3, 0), true)],
                 },
             ],

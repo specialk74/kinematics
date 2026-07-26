@@ -19,6 +19,7 @@ mod grid;
 mod layout;
 mod piece;
 mod reverser;
+mod sensor;
 mod simulation;
 mod source;
 mod trace;
@@ -36,6 +37,7 @@ use grid::GridPlugin;
 use layout::LayoutPlugin;
 use piece::PiecePlugin;
 use reverser::ReverserVisualsPlugin;
+use sensor::{SensorPlugin, SensorVisualsPlugin};
 use simulation::{SimulationControlsPlugin, SimulationPlugin, SimulationState};
 use source::{SourcePlugin, SourceVisualsPlugin};
 use trace::{Replay, TracePlugin, TraceVisualsPlugin};
@@ -90,6 +92,7 @@ fn main() {
             TurnerVisualsPlugin,
             ReverserVisualsPlugin,
             AntennaVisualsPlugin,
+            SensorVisualsPlugin,
         ));
     }
 
@@ -117,8 +120,10 @@ fn main() {
         CarrierPlugin,
         SourcePlugin,
         DespawnerPlugin,
-        // Anche senza finestra: registrare non ha bisogno di guardare.
+        // Anche senza finestra: registrare non ha bisogno di guardare, e i
+        // sensori devono vedere passare i carrier comunque.
         TracePlugin,
+        SensorPlugin,
     ))
     .run();
 }
