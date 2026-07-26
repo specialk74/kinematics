@@ -45,24 +45,36 @@ pub struct TracedCarrier {
     pub at: (f32, f32),
 }
 
-/// Un istante della simulazione: chi c'era, dove, e come erano messi gli
-/// interruttori. Gli oggetti sono indicati per cella e non per posizione
+/// Un istante della simulazione: chi c'era, dove, e quali interruttori sono
+/// cambiati. Gli oggetti sono indicati per cella e non per posizione
 /// nell'elenco: cosi' l'istante si legge da solo, senza dover contare.
+///
+/// I carrier ci sono tutti a ogni istante, perche' si muovono di continuo. Gli
+/// interruttori invece cambiano di rado: elencarli tutti ogni volta gonfiava il
+/// file di righe identiche, quindi si scrivono solo quando cambiano. Il primo
+/// istante li porta tutti, perche' li' non c'e' un "prima".
+///
+/// Un file scritto alla maniera vecchia, con tutti gli interruttori in ogni
+/// istante, resta valido: e' una sequenza di cambi anche quella, solo ripetuta.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct TraceFrame {
     pub carriers: Vec<TracedCarrier>,
-    /// Gli oggetti di linea, per cella.
+    /// Gli oggetti di linea che sono cambiati, per cella. Negli istanti in cui
+    /// non cambia niente il campo non viene proprio scritto: erano tre righe
+    /// vuote per istante, e un file lungo e' fatto di istanti in cui non cambia
+    /// niente.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub switches: Vec<((i32, i32), bool)>,
     /// I sensori sulle pareti, sempre per cella. Assente nelle registrazioni
     /// fatte prima che esistessero.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub side: Vec<((i32, i32), bool)>,
     /// Quelli del piano di sotto, sempre per cella. Stanno in un elenco a parte
     /// perche' un'antenna puo' condividere la cella con un oggetto di linea: in
     /// un elenco solo le due voci avrebbero la stessa chiave e in riproduzione
     /// non si saprebbe piu' quale stato appartiene a quale oggetto. Assente
     /// nelle registrazioni fatte prima delle antenne, che restano leggibili.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub under: Vec<((i32, i32), bool)>,
 }
 
@@ -113,6 +125,67 @@ pub struct Recording {
     active: bool,
     countdown: f32,
     frames: Vec<TraceFrame>,
+    /// Come erano messi gli interruttori nell'istante scritto prima: e' il
+    /// termine di paragone che permette di scrivere solo i cambi.
+    last: Switchboard,
+}
+
+/// Lo stato di tutti gli interruttori in un istante, un elenco per piano.
+#[derive(Default, Clone, PartialEq, Debug)]
+struct Switchboard {
+    track: Vec<((i32, i32), bool)>,
+    side: Vec<((i32, i32), bool)>,
+    under: Vec<((i32, i32), bool)>,
+}
+
+impl Switchboard {
+    /// I cambi di un solo istante, presi cosi' come stanno nel file.
+    fn of(frame: &TraceFrame) -> Self {
+        Switchboard {
+            track: frame.switches.clone(),
+            side: frame.side.clone(),
+            under: frame.under.clone(),
+        }
+    }
+}
+
+/// Gli interruttori che sono cambiati rispetto all'istante precedente. Chi non
+/// c'era prima conta come cambiato: e' cosi' che il primo istante li porta tutti.
+fn changes(now: &[((i32, i32), bool)], before: &[((i32, i32), bool)]) -> Vec<((i32, i32), bool)> {
+    now.iter()
+        .filter(|(cell, active)| {
+            !before
+                .iter()
+                .any(|(was_cell, was_active)| was_cell == cell && was_active == active)
+        })
+        .copied()
+        .collect()
+}
+
+/// Applica dei cambi a uno stato: quello che c'era viene aggiornato, quello che
+/// non c'era si aggiunge.
+fn apply(state: &mut Vec<((i32, i32), bool)>, changes: &[((i32, i32), bool)]) {
+    for (cell, active) in changes {
+        match state.iter_mut().find(|(known, _)| known == cell) {
+            Some((_, known)) => *known = *active,
+            None => state.push((*cell, *active)),
+        }
+    }
+}
+
+/// Somma i cambi dall'inizio fino a quell'istante compreso: e' come erano messi
+/// gli interruttori li'. Serve dopo un salto con la barra, quando gli istanti
+/// intermedi non sono passati per la scena.
+fn switchboard_up_to(trace: &Trace, index: usize) -> Switchboard {
+    let mut board = Switchboard::default();
+
+    for frame in trace.frames.iter().take(index + 1) {
+        apply(&mut board.track, &frame.switches);
+        apply(&mut board.side, &frame.side);
+        apply(&mut board.under, &frame.under);
+    }
+
+    board
 }
 
 #[derive(Resource, Default)]
@@ -384,11 +457,20 @@ fn toggle_recording(
     if recording.active {
         stop_recording(&mut recording, &placed);
     } else {
-        recording.active = true;
-        recording.countdown = 0.0;
-        recording.frames.clear();
-        info!("registrazione avviata");
+        begin(&mut recording);
     }
+}
+
+/// Fa ripartire la raccolta da zero. Sta in un posto solo perche' l'avvio da
+/// riga di comando e il bottone devono azzerare le stesse cose: in particolare
+/// il termine di paragone degli interruttori, senza il quale una seconda
+/// registrazione non scriverebbe il loro stato di partenza.
+fn begin(recording: &mut Recording) {
+    recording.active = true;
+    recording.countdown = 0.0;
+    recording.frames.clear();
+    recording.last = Switchboard::default();
+    info!("registrazione avviata");
 }
 
 /// Chiude la registrazione e la scrive su file, layout compreso.
@@ -447,6 +529,12 @@ fn record_frames(
     }
     recording.countdown += 1.0 / TRACE_FPS;
 
+    let now = Switchboard {
+        track: switches_on(Layer::Track, &placed, &switches),
+        side: switches_on(Layer::Side, &placed, &switches),
+        under: switches_on(Layer::Under, &placed, &switches),
+    };
+
     let frame = TraceFrame {
         carriers: carriers
             .iter()
@@ -456,11 +544,12 @@ fn record_frames(
                 at: (transform.translation.x, transform.translation.y),
             })
             .collect(),
-        switches: switches_on(Layer::Track, &placed, &switches),
-        side: switches_on(Layer::Side, &placed, &switches),
-        under: switches_on(Layer::Under, &placed, &switches),
+        switches: changes(&now.track, &recording.last.track),
+        side: changes(&now.side, &recording.last.side),
+        under: changes(&now.under, &recording.last.under),
     };
 
+    recording.last = now;
     recording.frames.push(frame);
 }
 
@@ -662,6 +751,7 @@ fn play_frames(
             return;
         }
     };
+    let previous = replay.applied;
     replay.applied = Some(wanted);
 
     let mut live: HashMap<u32, Entity> = carriers
@@ -691,11 +781,21 @@ fn play_frames(
 
     // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
     // deve richiudersi anche qui, altrimenti la scena non spiega piu' la coda
-    // che si vede. I due piani si ripristinano separatamente: e' l'unico modo di
-    // non confondere un'antenna con l'oggetto che le sta sopra.
-    restore(Layer::Track, &frame.switches, &placed, &mut switches);
-    restore(Layer::Side, &frame.side, &placed, &mut switches);
-    restore(Layer::Under, &frame.under, &placed, &mut switches);
+    // che si vede. I piani si ripristinano separatamente: e' l'unico modo di non
+    // confondere un'antenna con l'oggetto che le sta sopra.
+    //
+    // Nel file ci sono solo i cambi, quindi scorrendo basta applicare quelli
+    // dell'istante; dopo un salto con la barra invece i cambi intermedi non sono
+    // passati di qui, e va rifatta la somma dall'inizio.
+    let scrolled = previous.map(|last| last + 1) == Some(wanted);
+    let board = match (scrolled, replay.trace.as_ref()) {
+        (false, Some(trace)) => switchboard_up_to(trace, wanted),
+        _ => Switchboard::of(&frame),
+    };
+
+    restore(Layer::Track, &board.track, &placed, &mut switches);
+    restore(Layer::Side, &board.side, &placed, &mut switches);
+    restore(Layer::Under, &board.under, &placed, &mut switches);
 }
 
 fn restore(
@@ -771,10 +871,7 @@ fn refresh_buttons(
 
 /// Avvia la registrazione all'apertura, per chi la chiede da riga di comando.
 pub fn start_recording(mut recording: ResMut<Recording>) {
-    recording.active = true;
-    recording.countdown = 0.0;
-    recording.frames.clear();
-    info!("registrazione avviata");
+    begin(&mut recording);
 }
 
 /// Apre una registrazione passata da riga di comando: rimette in scena il suo
@@ -821,13 +918,12 @@ mod tests {
                         kind: CarrierType::WithTube,
                         at: (5.0, -20.0),
                     }],
-                    // Nel secondo istante il gate e' stato chiuso, mentre
-                    // l'antenna sotto e' rimasta accesa: stessa cella, stati
-                    // diversi, ed e' il caso che un elenco solo non saprebbe
-                    // raccontare.
+                    // Nel secondo istante e' cambiato solo il gate: l'antenna
+                    // sotto e il sensore accanto sono rimasti come stavano, e
+                    // infatti non compaiono.
                     switches: vec![((3, 0), false)],
-                    side: vec![((3, 0), true)],
-                    under: vec![((3, 0), true)],
+                    side: vec![],
+                    under: vec![],
                 },
             ],
         }
@@ -852,9 +948,9 @@ mod tests {
     #[test]
     fn an_antenna_keeps_its_own_state_under_an_object() {
         let reread = from_ron(&to_ron(&sample()).expect("scrittura")).expect("rilettura");
-        let closed = &reread.frames[1];
+        let closed = switchboard_up_to(&reread, 1);
 
-        assert_eq!(closed.switches, vec![((3, 0), false)], "il gate e' chiuso");
+        assert_eq!(closed.track, vec![((3, 0), false)], "il gate e' chiuso");
         assert_eq!(closed.under, vec![((3, 0), true)], "l'antenna e' accesa");
     }
 
@@ -876,6 +972,44 @@ mod tests {
         let written = to_ron(&sample()).expect("scrittura");
 
         assert!(written.contains("layout"), "{written}");
+    }
+
+    /// Il file non ripete gli interruttori a ogni istante: scrive solo quelli
+    /// che cambiano. Su una registrazione lunga sono la parte che cresceva
+    /// senza dire niente di nuovo.
+    #[test]
+    fn only_the_switches_that_changed_are_written() {
+        let before = [((3, 0), true), ((5, 0), false)];
+        let now = [((3, 0), false), ((5, 0), false)];
+
+        assert_eq!(changes(&now, &before), vec![((3, 0), false)]);
+        assert!(
+            changes(&now, &now).is_empty(),
+            "un istante identico al precedente non scrive niente"
+        );
+        assert_eq!(
+            changes(&now, &[]),
+            now.to_vec(),
+            "il primo istante li porta tutti, non avendo un prima"
+        );
+    }
+
+    /// Saltando con la barra gli istanti in mezzo non passano dalla scena:
+    /// lo stato di quel punto si ottiene sommando i cambi dall'inizio.
+    #[test]
+    fn the_state_at_an_instant_is_the_sum_of_the_changes() {
+        let trace = sample();
+
+        let start = switchboard_up_to(&trace, 0);
+        assert_eq!(start.track, vec![((3, 0), true)]);
+
+        let later = switchboard_up_to(&trace, 1);
+        assert_eq!(later.track, vec![((3, 0), false)], "il gate si e' chiuso");
+        assert_eq!(
+            later.under,
+            vec![((3, 0), true)],
+            "l'antenna non e' cambiata, ma il suo stato si porta avanti"
+        );
     }
 
     /// Gli interruttori sono registrati istante per istante: quello che si
