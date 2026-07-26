@@ -1,7 +1,7 @@
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{self, BUTTON_IDLE, Tool};
+use crate::editor::{self, BUTTON_IDLE, Mode, Tool};
 use crate::grid;
 use crate::layout::Placed;
 use crate::name::{NameRow, Naming, PieceName};
@@ -19,11 +19,10 @@ const ROW_REJECTED: Color = Color::srgb(0.70, 0.15, 0.15);
 /// Quanto scorre l'elenco a ogni scatto di rotella.
 const SCROLL_STEP: f32 = ROW_HEIGHT * 2.0;
 
-/// Il riquadro dell'evidenziatore attorno all'oggetto in scrittura, e quanto
-/// spesso lampeggia.
+/// Il riquadro dell'evidenziatore attorno all'oggetto in scrittura. Sta fermo:
+/// lampeggiava, e un lampeggio in mezzo a un impianto che si muove e' rumore.
 const HIGHLIGHT_SIZE: f32 = PIECE_SIZE + 16.0;
 const HIGHLIGHT_COLOR: Color = Color::srgb(1.0, 0.85, 0.2);
-const BLINK_SECONDS: f32 = 0.4;
 /// Dietro agli oggetti ma davanti ai carrier: l'oggetto evidenziato deve
 /// restare visibile, non finire coperto dal proprio evidenziatore.
 const HIGHLIGHT_Z: f32 = 0.5;
@@ -45,9 +44,9 @@ impl Plugin for NamePanelPlugin {
                 (
                     refresh_rows,
                     scroll_panel,
-                    blink_highlight,
+                    show_highlight,
                     show_hovered_name,
-                    hide_during_replay,
+                    only_in_the_editor,
                 ),
             );
     }
@@ -110,31 +109,29 @@ fn setup_hover(mut commands: Commands) {
     ));
 }
 
-/// Durante una riproduzione l'elenco sparisce: gli oggetti in scena sono quelli
-/// del file, e sceglierne uno non porterebbe da nessuna parte, visto che
-/// rinominarli mentre scorre la registrazione non ha senso.
-fn hide_during_replay(
+/// L'elenco dei nomi serve mentre si costruisce l'impianto. In simulazione e
+/// durante una riproduzione sparisce: li' gli oggetti si comandano, non si
+/// battezzano, e trenta righe di nomi rubano soltanto spazio alla scena.
+fn only_in_the_editor(
+    mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     mut naming: ResMut<Naming>,
     mut panel: Query<&mut Node, With<NamePanel>>,
 ) {
-    if !state.is_changed() {
+    if !mode.is_changed() && !state.is_changed() {
         return;
     }
 
-    let replaying = *state.get() == SimulationState::Replaying;
-    if replaying {
+    let wanted = *mode.get() == Mode::Editing && *state.get() != SimulationState::Replaying;
+
+    if !wanted {
         // Chi stava scrivendo un nome resta senza pannello: meglio chiudere la
         // scrittura che lasciarla aperta su una riga che non si vede piu'.
         naming.editing = None;
     }
 
     for mut node in panel.iter_mut() {
-        node.display = if replaying {
-            Display::None
-        } else {
-            Display::Flex
-        };
+        node.display = if wanted { Display::Flex } else { Display::None };
     }
 }
 
@@ -245,10 +242,9 @@ fn scroll_panel(
     }
 }
 
-/// L'oggetto che si sta rinominando lampeggia: il pannello dice il nome, la
-/// scena dice quale dei tanti e'.
-fn blink_highlight(
-    time: Res<Time>,
+/// L'oggetto che si sta rinominando resta evidenziato: il pannello dice il
+/// nome, la scena dice quale dei tanti e'.
+fn show_highlight(
     naming: Res<Naming>,
     objects: Query<&Transform, (With<Placed>, Without<Highlight>)>,
     mut highlight: Query<(&mut Transform, &mut Visibility), With<Highlight>>,
@@ -267,12 +263,7 @@ fn blink_highlight(
     };
 
     transform.translation = at.truncate().extend(HIGHLIGHT_Z);
-    let on = (time.elapsed_secs() / BLINK_SECONDS) as u32 % 2 == 0;
-    *visibility = if on {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
+    *visibility = Visibility::Visible;
 }
 
 /// Il nome dell'oggetto sotto il puntatore, scritto sopra di lui. Compare solo

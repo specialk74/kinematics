@@ -503,11 +503,15 @@ fn carrier_step(
         }
     }
 
-    // 4. La deviazione di corsia, che vale per chiunque: vuoti e pieni. Chi
-    //    debba essere deviato e chi no lo decidera' la logica di impianto
-    //    quando ci sara' mqtt; qui c'e' solo il movimento, e il movimento non
-    //    guarda dentro al carrier.
+    // 4. La deviazione di corsia. Per ora il divert smista solo i carrier con
+    //    la provetta e lascia proseguire i vuoti; l'ATR riporta indietro tutti.
+    //    E' una semplificazione in attesa di mqtt, che portera' la logica a
+    //    decidere chi deviare.
     for (divert, switch, facing, position) in track.diverts {
+        if !divert.takes(carrier.kind) {
+            continue;
+        }
+
         if !divert.catches(*switch, *position, translation, *facing, heading) {
             continue;
         }

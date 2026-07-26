@@ -155,16 +155,20 @@ where
         found.map(|(entity, placed, _)| (entity, placed.tool))
     };
 
-    // Prima chi ha una figura sotto il puntatore: fra l'oggetto di linea e il
-    // sensore sulla parete non c'e' sovrapposizione, quindi al piu' uno risponde.
-    let on_the_figure = objects().find(|(_, placed, facing)| {
-        placed.cell == cell
-            && placed.tool.layer() != Layer::Under
-            && piece::covers(placed.tool, **facing, grid::cell_center(cell), point)
-    });
+    // Prima chi ha una figura sotto il puntatore, e in ordine di piano: un
+    // pezzo di guida vale come area tutta la sua cella, quindi senza un ordine
+    // finirebbe per rubare il clic all'oggetto che ci sta sopra - e non avendo
+    // niente da comandare, il clic sembrerebbe non fare niente.
+    for layer in [Layer::Track, Layer::Side, Layer::Rail] {
+        let on_the_figure = objects().find(|(_, placed, facing)| {
+            placed.cell == cell
+                && placed.tool.layer() == layer
+                && piece::covers(placed.tool, **facing, grid::cell_center(cell), point)
+        });
 
-    if on_the_figure.is_some() {
-        return named(on_the_figure);
+        if on_the_figure.is_some() {
+            return named(on_the_figure);
+        }
     }
 
     // Nel resto della cella risponde l'antenna, se c'e'; altrimenti si torna a

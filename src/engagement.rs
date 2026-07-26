@@ -113,6 +113,10 @@ mod tests {
     /// Fa girare il sistema vero: un divert e un carrier, e si guarda se il
     /// divert se n'e' accorto.
     fn engaged(active: bool, carrier_at: Vec3) -> bool {
+        engaged_with(active, carrier_at, CarrierType::WithTube)
+    }
+
+    fn engaged_with(active: bool, carrier_at: Vec3, kind: CarrierType) -> bool {
         let mut app = App::new();
         app.add_plugins(EngagementPlugin);
 
@@ -134,7 +138,7 @@ mod tests {
         app.world_mut().spawn((
             Transform::from_translation(carrier_at),
             Carrier {
-                kind: CarrierType::Empty,
+                kind,
                 carrier_id: 1,
                 sample_id: None,
                 motion: Motion::Straight(Heading::Left),
@@ -159,6 +163,11 @@ mod tests {
         assert!(
             !engaged(true, Vec3::new(GRID_STEP / 2.0 - 1.0, 0.0, 0.0)),
             "di lato alla finestra di presa non lo tocca"
+        );
+        // E nemmeno un carrier che quel divert non smista.
+        assert!(
+            !engaged_with(true, Vec3::ZERO, CarrierType::Empty),
+            "un vuoto passa dritto, quindi il divert non sta agendo su di lui"
         );
     }
 

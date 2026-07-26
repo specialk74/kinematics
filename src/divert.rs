@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::carrier::{Carrier, Heading};
+use crate::carrier::{Carrier, CarrierType, Heading};
 use crate::editor::Tool;
 use crate::engagement::Engaged;
 use crate::piece::{self, PieceShapes};
@@ -53,6 +53,20 @@ impl Divert {
     /// come se non ci fosse.
     pub fn is_blocking(&self, switch: Switch) -> bool {
         switch.enabled && !switch.active && self.kind == DivertKind::Atr
+    }
+
+    /// Su chi agisce. Per ora il divert e' uno smistatore e prende solo i
+    /// carrier con la provetta; l'ATR li riporta indietro tutti, altrimenti un
+    /// vuoto finito sul ramo secondario non ne uscirebbe piu'.
+    ///
+    /// E' una semplificazione in attesa di mqtt: la cinematica non dovrebbe
+    /// guardare dentro al carrier, e quando ci sara' la logica di impianto sara'
+    /// lei a dire chi deviare e chi no.
+    pub fn takes(&self, kind: CarrierType) -> bool {
+        match self.kind {
+            DivertKind::Divert => kind == CarrierType::WithTube,
+            DivertKind::Atr => true,
+        }
     }
 
     /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
@@ -145,7 +159,7 @@ impl Engaged for Divert {
             return false;
         };
 
-        self.catches(switch, at, carrier_at, facing, heading)
+        self.takes(carrier.kind) && self.catches(switch, at, carrier_at, facing, heading)
     }
 }
 
