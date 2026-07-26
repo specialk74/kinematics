@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use crate::carrier::{Blocker, Heading};
 use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes};
+use crate::switch::{Look, Switch};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
 /// quando e' spenta li lascia passare. Se e' fuori dal flusso non blocca nessuno,
@@ -11,9 +12,7 @@ use crate::piece::{self, Arrow, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShap
 /// cosi' il carrier che ferma si arresta quasi al centro della cella accanto,
 /// dove puo' esserci un'antenna a leggerlo.
 #[derive(Component)]
-pub struct Gate {
-    pub active: bool,
-}
+pub struct Gate;
 
 /// Il gate non ha sistemi propri: a bloccare i carrier ci pensa il loro
 /// movimento. Qui c'e' solo l'aspetto, quindi si monta solo con l'interfaccia.
@@ -28,14 +27,12 @@ impl Plugin for GateVisualsPlugin {
 
 #[derive(Resource)]
 pub struct GateAssets {
-    active_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    look: Look,
 }
 
 fn setup_gate_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(GateAssets {
-        active_material: materials.add(Color::srgb(0.9, 0.1, 0.1)),
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        look: Look::new(&mut materials, Color::srgb(0.9, 0.1, 0.1)),
     });
 }
 
@@ -58,31 +55,27 @@ pub fn bar(position: Vec3, facing: Heading) -> Blocker {
 /// resta visibile quando si accodano.
 pub fn spawn_gate(commands: &mut Commands, position: Vec3) -> Entity {
     commands
-        .spawn((Transform::from_translation(position), Gate { active: true }))
+        .spawn((Transform::from_translation(position), Gate))
         .id()
 }
 
-fn material_for(assets: &GateAssets, active: bool) -> Handle<ColorMaterial> {
-    if active {
-        assets.active_material.clone()
-    } else {
-        assets.idle_material.clone()
-    }
+fn material_for(assets: &GateAssets, switch: Switch) -> Handle<ColorMaterial> {
+    assets.look.material(switch, false)
 }
 
 fn attach_gate_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<GateAssets>,
-    gates: Query<(Entity, &Gate), Without<Mesh2d>>,
+    gates: Query<(Entity, &Switch), (With<Gate>, Without<Mesh2d>)>,
 ) {
-    for (entity, gate) in gates.iter() {
+    for (entity, switch) in gates.iter() {
         piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
             piece::bar(&shapes),
-            material_for(&assets, gate.active),
+            material_for(&assets, *switch),
             Arrow::None,
         );
     }
@@ -92,10 +85,10 @@ fn attach_gate_visuals(
 /// accende o spegne un gate tocca solo `active` e non deve sapere nulla di mesh.
 fn refresh_gate_colour(
     assets: Res<GateAssets>,
-    gates: Query<(&Gate, &mut MeshMaterial2d<ColorMaterial>), Changed<Gate>>,
+    gates: Query<(&Switch, &mut MeshMaterial2d<ColorMaterial>), (With<Gate>, Changed<Switch>)>,
 ) {
-    for (gate, mut material) in gates {
-        material.0 = material_for(&assets, gate.active);
+    for (switch, mut material) in gates {
+        material.0 = material_for(&assets, *switch);
     }
 }
 

@@ -25,6 +25,7 @@ mod reverser;
 mod sensor;
 mod simulation;
 mod source;
+mod switch;
 mod trace;
 mod turner;
 

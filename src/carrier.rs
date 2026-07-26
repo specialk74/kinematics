@@ -9,6 +9,7 @@ use crate::geometry::circle_touches_box;
 use crate::piece::{Facing, PIECE_SIZE};
 use crate::reverser::{Reverser, TURN_RADIUS};
 use crate::simulation::SimulationState;
+use crate::switch::Switch;
 use crate::turner::Turner;
 
 pub const BELT_SPEED: f32 = 100.0;
@@ -436,9 +437,9 @@ fn placeholder_sample_id(carrier_id: u32) -> Option<SampleId> {
 
 /// Quello che il mondo puo' dire a un carrier in movimento.
 pub struct Track<'a> {
-    pub diverts: &'a [(&'a Divert, Heading, Vec3)],
-    pub turners: &'a [(&'a Turner, Heading, Vec3)],
-    pub reversers: &'a [(&'a Reverser, Vec3)],
+    pub diverts: &'a [(&'a Divert, Switch, Heading, Vec3)],
+    pub turners: &'a [(&'a Turner, Switch, Heading, Vec3)],
+    pub reversers: &'a [(&'a Reverser, Switch, Vec3)],
 }
 
 /// Spostamento del carrier in questo frame e come si muovera' dopo. L'ordine di
@@ -482,8 +483,8 @@ fn carrier_step(
     //    curva si costruisce rispetto alla direzione del carrier. Dopo il mezzo
     //    giro il carrier esce a una cella di distanza, quindi lo stesso oggetto
     //    non lo riprende e non si crea un cerchio infinito.
-    for (reverser, position) in track.reversers {
-        if reverser.active && crosses(*position, translation, straight, heading) {
+    for (reverser, switch, position) in track.reversers {
+        if switch.working() && crosses(*position, translation, straight, heading) {
             // Si parte dal centro esatto dell'oggetto: e' quello che rende il
             // diametro della curva una cella piena.
             let snap = (position.truncate() - translation.truncate()).extend(0.0);
@@ -493,8 +494,8 @@ fn carrier_step(
 
     // 3. La svolta vale per tutti i carrier, tubo o non tubo: la nuova marcia e'
     //    quella indicata dalla freccia dell'oggetto.
-    for (turner, facing, position) in track.turners {
-        if turner.active && crosses(*position, translation, straight, heading) {
+    for (_turner, switch, facing, position) in track.turners {
+        if switch.working() && crosses(*position, translation, straight, heading) {
             // Si riparte dal centro esatto dell'oggetto, altrimenti la nuova
             // marcia partirebbe sfalsata rispetto alla griglia.
             let snap = (position.truncate() - translation.truncate()).extend(0.0);
@@ -507,8 +508,8 @@ fn carrier_step(
         return (straight, carrier.motion);
     }
 
-    for (divert, facing, position) in track.diverts {
-        if !divert.catches(*position, translation, *facing, heading) {
+    for (divert, switch, facing, position) in track.diverts {
+        if !divert.catches(*switch, *position, translation, *facing, heading) {
             continue;
         }
 
@@ -610,24 +611,24 @@ pub fn resolve_frame(
 fn move_carrier(
     time: Res<Time>,
     mut query: Query<(Entity, &mut Carrier, &mut Transform)>,
-    gates: Query<(&Gate, &Facing, &Transform), Without<Carrier>>,
-    diverts: Query<(&Divert, &Facing, &Transform), Without<Carrier>>,
-    turners: Query<(&Turner, &Facing, &Transform), Without<Carrier>>,
-    reversers: Query<(&Reverser, &Transform), Without<Carrier>>,
+    gates: Query<(&Gate, &Switch, &Facing, &Transform), Without<Carrier>>,
+    diverts: Query<(&Divert, &Switch, &Facing, &Transform), Without<Carrier>>,
+    turners: Query<(&Turner, &Switch, &Facing, &Transform), Without<Carrier>>,
+    reversers: Query<(&Reverser, &Switch, &Transform), Without<Carrier>>,
 ) {
     let delta_secs = time.delta_secs();
 
-    let diverts: Vec<(&Divert, Heading, Vec3)> = diverts
+    let diverts: Vec<(&Divert, Switch, Heading, Vec3)> = diverts
         .iter()
-        .map(|(divert, facing, transform)| (divert, facing.0, transform.translation))
+        .map(|(divert, switch, facing, at)| (divert, *switch, facing.0, at.translation))
         .collect();
-    let turners: Vec<(&Turner, Heading, Vec3)> = turners
+    let turners: Vec<(&Turner, Switch, Heading, Vec3)> = turners
         .iter()
-        .map(|(turner, facing, transform)| (turner, facing.0, transform.translation))
+        .map(|(turner, switch, facing, at)| (turner, *switch, facing.0, at.translation))
         .collect();
-    let reversers: Vec<(&Reverser, Vec3)> = reversers
+    let reversers: Vec<(&Reverser, Switch, Vec3)> = reversers
         .iter()
-        .map(|(reverser, transform)| (reverser, transform.translation))
+        .map(|(reverser, switch, at)| (reverser, *switch, at.translation))
         .collect();
     let track = Track {
         diverts: &diverts,
@@ -639,15 +640,15 @@ fn move_carrier(
     // fermano. Per il movimento sono la stessa lista.
     let blockers: Vec<Blocker> = gates
         .iter()
-        .filter(|(gate, _, _)| gate.active)
-        .map(|(_, facing, transform)| gate::bar(transform.translation, facing.0))
+        .filter(|(_, switch, _, _)| switch.working())
+        .map(|(_, _, facing, transform)| gate::bar(transform.translation, facing.0))
         // L'ATR spento chiude tutta la sua cella, non un lato: chi arriva non ha
         // nessun modo di passare, ne' dritto ne' di lato.
         .chain(
             diverts
                 .iter()
-                .filter(|(divert, _, _)| divert.is_blocking())
-                .map(|(_, _, position)| Blocker {
+                .filter(|(divert, switch, _, _)| divert.is_blocking(*switch))
+                .map(|(_, _, _, position)| Blocker {
                     centre: *position,
                     half: Vec2::splat(PIECE_SIZE / 2.0),
                 }),
@@ -700,7 +701,6 @@ mod tests {
     fn atr() -> Divert {
         Divert {
             kind: DivertKind::Atr,
-            active: true,
             engaged: false,
         }
     }
@@ -724,7 +724,24 @@ mod tests {
 
     /// Percorso con i soli deviatori: la maggior parte dei test non ha bisogno
     /// degli altri oggetti.
-    fn only_diverts<'a>(diverts: &'a [(&'a Divert, Heading, Vec3)]) -> Track<'a> {
+    /// Un oggetto in servizio e comandato, e uno fuori servizio: nei test
+    /// servono di continuo.
+    const ON: Switch = Switch {
+        enabled: true,
+        active: true,
+    };
+    const OFF: Switch = Switch {
+        enabled: false,
+        active: true,
+    };
+    /// In servizio ma non comandato: e' il divert che lascia proseguire dritto
+    /// e l'ATR che invece sbarra la strada.
+    const OFF_COMMAND: Switch = Switch {
+        enabled: true,
+        active: false,
+    };
+
+    fn only_diverts<'a>(diverts: &'a [(&'a Divert, Switch, Heading, Vec3)]) -> Track<'a> {
         Track {
             diverts,
             turners: &[],
@@ -753,13 +770,13 @@ mod tests {
     fn divert_and_atr_hand_the_carrier_back_to_the_main_lane() {
         let divert = Divert {
             kind: DivertKind::Divert,
-            active: true,
             engaged: false,
         };
         let deviators = [
-            (&divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (&divert, ON, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
             (
                 &atr(),
+                ON,
                 Heading::Left,
                 Vec3::new(-3.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
@@ -797,7 +814,7 @@ mod tests {
             position += carrier_step(
                 &carrier,
                 position,
-                &only_diverts(&[(&atr, Heading::Left, atr_position)]),
+                &only_diverts(&[(&atr, ON, Heading::Left, atr_position)]),
                 DELTA,
             )
             .0;
@@ -817,7 +834,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             almost_there,
-            &only_diverts(&[(&atr, Heading::Left, atr_position)]),
+            &only_diverts(&[(&atr, ON, Heading::Left, atr_position)]),
             DELTA,
         );
 
@@ -834,15 +851,20 @@ mod tests {
     fn a_switched_off_divert_leaves_the_flow_alone() {
         let off_divert = Divert {
             kind: DivertKind::Divert,
-            active: false,
             engaged: false,
         };
         let live_atr = atr();
         let carrier = carrier(CarrierType::WithTube);
         let deviators = [
-            (&off_divert, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0)),
+            (
+                &off_divert,
+                OFF_COMMAND,
+                Heading::Up,
+                Vec3::new(0.0, MAIN_LANE, 0.0),
+            ),
             (
                 &live_atr,
+                ON,
                 Heading::Left,
                 Vec3::new(-2.0 * GRID_STEP, MAIN_LANE + GRID_STEP, 0.0),
             ),
@@ -865,11 +887,10 @@ mod tests {
     fn a_divert_shifts_a_rising_carrier_one_column_to_its_right() {
         let divert = Divert {
             kind: DivertKind::Divert,
-            active: true,
             engaged: false,
         };
         let divert_position = Vec3::ZERO;
-        let diverts = [(&divert, Heading::Right, divert_position)];
+        let diverts = [(&divert, ON, Heading::Right, divert_position)];
         let track = only_diverts(&diverts);
 
         let mut carrier = carrier(CarrierType::WithTube);
@@ -893,7 +914,7 @@ mod tests {
     #[test]
     fn an_atr_shifts_a_rising_carrier_one_column_to_its_left() {
         let atr_position = Vec3::ZERO;
-        let diverts = [(&atr(), Heading::Up, atr_position)];
+        let diverts = [(&atr(), ON, Heading::Up, atr_position)];
         let track = only_diverts(&diverts);
 
         let mut carrier = carrier(CarrierType::WithTube);
@@ -914,13 +935,13 @@ mod tests {
     fn divert_and_atr_cancel_out_on_a_vertical_flow() {
         let divert = Divert {
             kind: DivertKind::Divert,
-            active: true,
             engaged: false,
         };
         let diverts = [
-            (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
+            (&divert, ON, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
             (
                 &atr(),
+                ON,
                 Heading::Up,
                 Vec3::new(GRID_STEP, 3.0 * GRID_STEP, 0.0),
             ),
@@ -941,14 +962,11 @@ mod tests {
     /// Chi va a sinistra svolta verso l'alto: la destra e' quella del carrier.
     #[test]
     fn a_turner_sends_a_leftward_carrier_upwards() {
-        let turner = Turner {
-            active: true,
-            engaged: false,
-        };
+        let turner = Turner { engaged: false };
         let turner_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, Heading::Up, turner_position)],
+            turners: &[(&turner, ON, Heading::Up, turner_position)],
             reversers: &[],
         };
 
@@ -971,13 +989,13 @@ mod tests {
     fn an_atr_brings_a_rising_flow_back_to_the_divert_column() {
         let divert = Divert {
             kind: DivertKind::Divert,
-            active: true,
             engaged: false,
         };
         let diverts = [
-            (&divert, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
+            (&divert, ON, Heading::Right, Vec3::new(0.0, 0.0, 0.0)),
             (
                 &atr(),
+                ON,
                 Heading::Up,
                 Vec3::new(GRID_STEP, 4.0 * GRID_STEP, 0.0),
             ),
@@ -1003,11 +1021,10 @@ mod tests {
     fn a_carrier_caught_mid_manoeuvre_still_finishes_it() {
         let off_atr = Divert {
             kind: DivertKind::Atr,
-            active: false,
             engaged: false,
         };
         let atr_position = Vec3::ZERO;
-        let diverts = [(&off_atr, Heading::Up, atr_position)];
+        let diverts = [(&off_atr, OFF_COMMAND, Heading::Up, atr_position)];
         let track = only_diverts(&diverts);
 
         let carrier = carrier(CarrierType::WithTube);
@@ -1131,11 +1148,8 @@ mod tests {
     /// dietro, non fermarsi contro di lui.
     #[test]
     fn a_queue_of_carriers_flows_through_a_turner() {
-        let turner = Turner {
-            active: true,
-            engaged: false,
-        };
-        let turners = [(&turner, Heading::Up, Vec3::ZERO)];
+        let turner = Turner { engaged: false };
+        let turners = [(&turner, ON, Heading::Up, Vec3::ZERO)];
         let track = Track {
             diverts: &[],
             turners: &turners,
@@ -1188,14 +1202,11 @@ mod tests {
     /// girato verso destra manda a destra chiunque ci passi.
     #[test]
     fn the_arrow_decides_the_new_heading() {
-        let turner = Turner {
-            active: true,
-            engaged: false,
-        };
+        let turner = Turner { engaged: false };
         let turner_position = Vec3::ZERO;
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, Heading::Right, turner_position)],
+            turners: &[(&turner, ON, Heading::Right, turner_position)],
             reversers: &[],
         };
 
@@ -1226,13 +1237,10 @@ mod tests {
 
     #[test]
     fn a_switched_off_turner_lets_the_carrier_through() {
-        let turner = Turner {
-            active: false,
-            engaged: false,
-        };
+        let turner = Turner { engaged: false };
         let track = Track {
             diverts: &[],
-            turners: &[(&turner, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0))],
+            turners: &[(&turner, OFF, Heading::Up, Vec3::new(0.0, MAIN_LANE, 0.0))],
             reversers: &[],
         };
 
@@ -1252,15 +1260,12 @@ mod tests {
     /// diversa da quella di andata, senza mai risalire sopra di essa.
     #[test]
     fn the_reverser_sends_the_carrier_back_on_another_line() {
-        let reverser = Reverser {
-            active: true,
-            engaged: false,
-        };
+        let reverser = Reverser { engaged: false };
         let reverser_position = Vec3::new(0.0, MAIN_LANE, 0.0);
         let track = Track {
             diverts: &[],
             turners: &[],
-            reversers: &[(&reverser, reverser_position)],
+            reversers: &[(&reverser, ON, reverser_position)],
         };
 
         let mut carrier = carrier(CarrierType::Empty);
@@ -1291,15 +1296,12 @@ mod tests {
     /// su una colonna diversa da quella di salita.
     #[test]
     fn the_reverser_also_turns_a_rising_carrier() {
-        let reverser = Reverser {
-            active: true,
-            engaged: false,
-        };
+        let reverser = Reverser { engaged: false };
         let reverser_position = Vec3::new(0.0, 0.0, 0.0);
         let track = Track {
             diverts: &[],
             turners: &[],
-            reversers: &[(&reverser, reverser_position)],
+            reversers: &[(&reverser, ON, reverser_position)],
         };
 
         let mut carrier = carrier(CarrierType::Empty);
@@ -1319,14 +1321,11 @@ mod tests {
 
     #[test]
     fn a_switched_off_reverser_lets_the_carrier_through() {
-        let reverser = Reverser {
-            active: false,
-            engaged: false,
-        };
+        let reverser = Reverser { engaged: false };
         let track = Track {
             diverts: &[],
             turners: &[],
-            reversers: &[(&reverser, Vec3::new(0.0, MAIN_LANE, 0.0))],
+            reversers: &[(&reverser, OFF, Vec3::new(0.0, MAIN_LANE, 0.0))],
         };
 
         let mut carrier = carrier(CarrierType::Empty);
@@ -1386,7 +1385,7 @@ mod tests {
         let (step, _) = carrier_step(
             &carrier,
             position,
-            &only_diverts(&[(&atr(), Heading::Left, position)]),
+            &only_diverts(&[(&atr(), ON, Heading::Left, position)]),
             DELTA,
         );
 

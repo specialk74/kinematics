@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::carrier::{CARRIER_SIZE, Carrier, NextCarrierId, spawn_random_carrier};
 use crate::piece::{self, Arrow, Facing, PieceShapes};
 use crate::simulation::SimulationState;
+use crate::switch::{Look, Switch};
 
 pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 
@@ -11,7 +12,6 @@ pub const CARRIER_SPAWN_TIME: f32 = 0.500;
 #[derive(Component)]
 pub struct CarrierSource {
     timer: Timer,
-    pub active: bool,
 }
 
 impl CarrierSource {
@@ -46,37 +46,31 @@ impl Plugin for SourceVisualsPlugin {
 
 #[derive(Resource)]
 pub struct SourceAssets {
-    active_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    look: Look,
 }
 
 fn setup_source_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(SourceAssets {
-        active_material: materials.add(Color::srgb(0.2, 0.5, 1.0)),
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        look: Look::new(&mut materials, Color::srgb(0.2, 0.5, 1.0)),
     });
 }
 
-fn material_for(assets: &SourceAssets, active: bool) -> Handle<ColorMaterial> {
-    if active {
-        assets.active_material.clone()
-    } else {
-        assets.idle_material.clone()
-    }
+fn material_for(assets: &SourceAssets, switch: Switch) -> Handle<ColorMaterial> {
+    assets.look.material(switch, false)
 }
 
 fn attach_source_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<SourceAssets>,
-    sources: Query<(Entity, &CarrierSource), Without<Mesh2d>>,
+    sources: Query<(Entity, &Switch), (With<CarrierSource>, Without<Mesh2d>)>,
 ) {
-    for (entity, source) in sources.iter() {
+    for (entity, switch) in sources.iter() {
         piece::dress(
             &mut commands,
             entity,
             &shapes,
-            material_for(&assets, source.active),
+            material_for(&assets, *switch),
             Arrow::Straight,
         );
     }
@@ -84,10 +78,13 @@ fn attach_source_visuals(
 
 fn refresh_source_colour(
     assets: Res<SourceAssets>,
-    sources: Query<(&CarrierSource, &mut MeshMaterial2d<ColorMaterial>), Changed<CarrierSource>>,
+    sources: Query<
+        (&Switch, &mut MeshMaterial2d<ColorMaterial>),
+        (With<CarrierSource>, Changed<Switch>),
+    >,
 ) {
-    for (source, mut material) in sources {
-        material.0 = material_for(&assets, source.active);
+    for (switch, mut material) in sources {
+        material.0 = material_for(&assets, *switch);
     }
 }
 
@@ -97,7 +94,6 @@ pub fn spawn_source(commands: &mut Commands, position: Vec3) -> Entity {
             Transform::from_translation(position),
             CarrierSource {
                 timer: Timer::from_seconds(CARRIER_SPAWN_TIME, TimerMode::Repeating),
-                active: true,
             },
         ))
         .id()
@@ -106,14 +102,14 @@ pub fn spawn_source(commands: &mut Commands, position: Vec3) -> Entity {
 fn spawn_from_sources(
     mut commands: Commands,
     time: Res<Time>,
-    mut sources: Query<(&mut CarrierSource, &Facing, &Transform)>,
+    mut sources: Query<(&mut CarrierSource, &Switch, &Facing, &Transform)>,
     carriers: Query<&Transform, With<Carrier>>,
     mut ids: ResMut<NextCarrierId>,
 ) {
-    for (mut source, facing, transform) in sources.iter_mut() {
-        // Da spenta non emette e non conta nemmeno il tempo: riaccesa riparte
-        // da dov'era, invece di recuperare l'attesa in un colpo solo.
-        if !source.active {
+    for (mut source, switch, facing, transform) in sources.iter_mut() {
+        // Ferma non emette e non conta nemmeno il tempo: ripartendo riprende da
+        // dov'era, invece di recuperare l'attesa in un colpo solo.
+        if !switch.working() {
             continue;
         }
 

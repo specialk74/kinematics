@@ -2,21 +2,15 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::antenna::Antenna;
-use crate::divert::{Divert, DivertKind};
+use crate::divert::DivertKind;
 use crate::editor::Tool;
-use crate::gate::Gate;
 use crate::name::{Identity, PieceId, PieceName};
 use crate::piece::Facing;
-use crate::reverser::Reverser;
-use crate::sensor::Sensor;
-use crate::source::CarrierSource;
-use crate::turner::Turner;
+use crate::switch::Switch;
 
 /// File usato quando non se ne passa uno sulla riga di comando. Il percorso e'
 /// relativo alla cartella da cui si lancia il programma, non a dove sta l'eseguibile.
@@ -92,64 +86,6 @@ pub struct Placed {
     pub cell: IVec2,
 }
 
-/// Gli oggetti che si accendono e si spengono. Raggrupparli evita di trascinare
-/// cinque query separate in ogni sistema che li tocca.
-#[derive(SystemParam)]
-pub struct Switches<'w, 's> {
-    sources: Query<'w, 's, &'static mut CarrierSource>,
-    gates: Query<'w, 's, &'static mut Gate>,
-    diverts: Query<'w, 's, &'static mut Divert>,
-    turners: Query<'w, 's, &'static mut Turner>,
-    reversers: Query<'w, 's, &'static mut Reverser>,
-    antennas: Query<'w, 's, &'static mut Antenna>,
-    sensors: Query<'w, 's, &'static mut Sensor>,
-}
-
-impl Switches<'_, '_> {
-    /// Stato dell'oggetto, se e' di quelli che si accendono.
-    pub fn get(&self, entity: Entity) -> Option<bool> {
-        if let Ok(source) = self.sources.get(entity) {
-            Some(source.active)
-        } else if let Ok(gate) = self.gates.get(entity) {
-            Some(gate.active)
-        } else if let Ok(divert) = self.diverts.get(entity) {
-            Some(divert.active)
-        } else if let Ok(turner) = self.turners.get(entity) {
-            Some(turner.active)
-        } else if let Ok(reverser) = self.reversers.get(entity) {
-            Some(reverser.active)
-        } else if let Ok(antenna) = self.antennas.get(entity) {
-            Some(antenna.active)
-        } else {
-            self.sensors.get(entity).ok().map(|s| s.active)
-        }
-    }
-
-    pub fn set(&mut self, entity: Entity, active: bool) {
-        if let Ok(mut source) = self.sources.get_mut(entity) {
-            source.active = active;
-        } else if let Ok(mut gate) = self.gates.get_mut(entity) {
-            gate.active = active;
-        } else if let Ok(mut divert) = self.diverts.get_mut(entity) {
-            divert.active = active;
-        } else if let Ok(mut turner) = self.turners.get_mut(entity) {
-            turner.active = active;
-        } else if let Ok(mut reverser) = self.reversers.get_mut(entity) {
-            reverser.active = active;
-        } else if let Ok(mut antenna) = self.antennas.get_mut(entity) {
-            antenna.active = active;
-        } else if let Ok(mut sensor) = self.sensors.get_mut(entity) {
-            sensor.active = active;
-        }
-    }
-
-    pub fn toggle(&mut self, entity: Entity) {
-        if let Some(active) = self.get(entity) {
-            self.set(entity, !active);
-        }
-    }
-}
-
 /// Costruisce la scena statica. Sta qui e non nell'editor perche' serve anche
 /// senza interfaccia: e' il modo in cui un impianto salvato torna in memoria.
 pub struct LayoutPlugin;
@@ -194,6 +130,8 @@ pub fn place_in_cell(
     commands.entity(object).insert((
         Placed { tool, cell },
         facing,
+        // In servizio, e comandato se comandarlo vuol dire agire.
+        Switch::fresh(tool.forces_signal()),
         PieceId(who.id),
         PieceName(who.name),
     ));

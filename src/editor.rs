@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::carrier::Carrier;
 use crate::grid;
-use crate::layout::{self, LayoutFile, Placed, Switches, place_in_cell, spawn_layout};
+use crate::layout::{self, LayoutFile, Placed, place_in_cell, spawn_layout};
 use crate::name::{self, Identity, PieceId, PieceName};
 use crate::piece::{self, Facing, PieceShapes};
 use crate::simulation::SimulationState;
+use crate::switch::Switch;
 
 pub const PALETTE_WIDTH: f32 = 120.0;
 
@@ -55,6 +56,13 @@ impl Tool {
             Tool::TubeSensor => "Sens. tubo",
             Tool::CarrierSensor => "Sens. carrier",
         }
+    }
+
+    /// Vero se per questo oggetto "attivo" vuol dire forzare il proprio segnale
+    /// invece di comandare un'azione: sensori e antenna. Serve a saperlo prima
+    /// ancora che l'oggetto esista, quando gli si da' lo stato di partenza.
+    pub fn forces_signal(self) -> bool {
+        matches!(self, Tool::Antenna | Tool::TubeSensor | Tool::CarrierSensor)
     }
 
     pub fn layer(self) -> Layer {
@@ -202,6 +210,39 @@ const MODES: [EditorTool; 13] = [
     EditorTool::GateWithAntenna,
 ];
 
+/// In che modalita' e' il programma. Sono due mestieri diversi con gli stessi
+/// due tasti del mouse: nell'editor si costruisce l'impianto, in simulazione lo
+/// si comanda. Tenerli separati e' quello che libera il tasto destro, altrimenti
+/// occupato dalla rotazione.
+#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Mode {
+    #[default]
+    Editing,
+    Simulating,
+}
+
+impl Mode {
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Editing => "Editor",
+            Mode::Simulating => "Simulazione",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Mode::Editing => Mode::Simulating,
+            Mode::Simulating => Mode::Editing,
+        }
+    }
+}
+
+#[derive(Component)]
+struct ModeButton;
+
+#[derive(Component)]
+struct ModeLabel;
+
 /// Modo attivo.
 #[derive(Resource)]
 pub struct SelectedTool(pub EditorTool);
@@ -214,6 +255,10 @@ impl Default for SelectedTool {
 
 #[derive(Component)]
 struct ToolButton(EditorTool);
+
+/// La barra degli strumenti: in simulazione sparisce.
+#[derive(Component)]
+struct Palette;
 
 /// I due comandi sul file di layout, in fondo alla barra.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -247,15 +292,6 @@ const BUTTON_FAILED: Color = Color::srgb(0.70, 0.15, 0.15);
 /// era una riga di log che l'utente non ha davanti agli occhi.
 #[derive(Resource, Default)]
 struct SaveNotice(Option<(bool, Timer)>);
-
-/// Spostamento sotto il quale una pressione conta come clic e non come
-/// trascinata: serve a non commutare un oggetto quando ci si appoggia sopra per
-/// spostare la vista.
-const CLICK_SLOP: f32 = 4.0;
-
-/// Dove si trovava il puntatore quando e' stato premuto il tasto.
-#[derive(Resource, Default)]
-struct PressOrigin(Option<Vec2>);
 
 /// Oggetto che si sta trascinando. Lo legge anche la camera: mentre si sposta
 /// un oggetto la vista deve restare ferma.
@@ -322,7 +358,6 @@ pub struct EditorPlugin;
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SelectedTool>()
-            .init_resource::<PressOrigin>()
             .init_resource::<SaveNotice>()
             .init_resource::<DraggedPiece>()
             .add_systems(Startup, (setup_palette, setup_ghost_material))
@@ -343,14 +378,21 @@ impl Plugin for EditorPlugin {
             // mezzo secondo.
             .add_systems(
                 Update,
-                (
-                    place_selected_tool,
-                    toggle_by_click,
-                    rotate_piece,
-                    drag_piece,
-                )
+                (place_selected_tool, rotate_piece, drag_piece)
+                    .run_if(in_state(Mode::Editing))
                     .run_if(not(in_state(SimulationState::Replaying))),
-            );
+            )
+            // In simulazione i due tasti comandano gli oggetti invece di
+            // costruirli: sinistro il servizio, destro l'azione.
+            .add_systems(
+                Update,
+                (enable_by_click, activate_by_click)
+                    .run_if(in_state(Mode::Simulating))
+                    .run_if(not(in_state(SimulationState::Replaying))),
+            )
+            .init_state::<Mode>()
+            .add_systems(Startup, setup_mode_button)
+            .add_systems(Update, (switch_mode, show_mode));
     }
 }
 
@@ -366,6 +408,7 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
                 ..default()
             },
             BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
+            Palette,
         ))
         .with_children(|palette| {
             for mode in MODES {
@@ -604,7 +647,6 @@ fn place_selected_tool(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     placed: Query<(Entity, &Placed, &Facing)>,
     ui_interactions: Query<&Interaction>,
-    mut switches: Switches,
     selected: Res<SelectedTool>,
     identities: Query<(&PieceId, &PieceName)>,
 ) {
@@ -650,15 +692,10 @@ fn place_selected_tool(
         );
 
         if let Some((entity, occupant)) = same_layer {
-            // Stesso strumento: si accende o si spegne quello che c'e', e con lo
-            // strumento doppio si accende solo la parte che si sta puntando.
-            // Rimpiazzarli tutti e due azzererebbe i loro interruttori.
+            // Stesso strumento sulla stessa cella: non si fa niente. Rifare
+            // l'oggetto gli cambierebbe id e nome, e accenderlo o spegnerlo e'
+            // un mestiere della simulazione, non dell'editor.
             if occupant == tool {
-                let pointed = clicked_piece(point, cell, || placed.iter());
-
-                if pointed.is_none_or(|(pointed, _)| pointed == entity) {
-                    switches.toggle(entity);
-                }
                 continue;
             }
 
@@ -690,56 +727,129 @@ fn place_selected_tool(
     }
 }
 
-/// In modo "Sposta" il tasto sinistro trascina la vista, ma una pressione che
-/// non si sposta e' un clic: serve ad accendere e spegnere gli oggetti senza
-/// dover tornare allo strumento con cui erano stati piazzati.
-fn toggle_by_click(
+/// Clic sinistro su un oggetto, in simulazione: lo mette in servizio o lo toglie.
+/// Fuori servizio l'oggetto non fa la sua funzione e non manda niente, che e' il
+/// modo in cui un tester lo fa sparire dal programma sotto collaudo.
+fn enable_by_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     ui_interactions: Query<&Interaction>,
-    selected: Res<SelectedTool>,
     placed: Query<(Entity, &Placed, &Facing)>,
-    mut switches: Switches,
-    mut press: ResMut<PressOrigin>,
+    mut switches: Query<&mut Switch>,
 ) {
-    let cursor = windows
-        .single()
-        .ok()
-        .and_then(|window| window.cursor_position());
-
-    if mouse.just_pressed(MouseButton::Left) {
-        press.0 = cursor;
-    }
-
-    if !mouse.just_released(MouseButton::Left) {
-        return;
-    }
-
-    let Some(origin) = press.0.take() else {
-        return;
-    };
-    if selected.0 != EditorTool::Pan {
-        return;
-    }
-
-    // Se il puntatore si e' mosso, quella era una trascinata della vista.
-    let Some(cursor) = cursor else {
-        return;
-    };
-    if origin.distance(cursor) > CLICK_SLOP {
-        return;
-    }
-
-    let Some(point) = cursor_world(&windows, &camera_query, &ui_interactions) else {
-        return;
-    };
-    let cell = grid::cell(point);
-    let Some((entity, _)) = clicked_piece(point, cell, || placed.iter()) else {
+    let Some(entity) = pointed_piece(
+        MouseButton::Left,
+        &mouse,
+        &windows,
+        &camera_query,
+        &ui_interactions,
+        &placed,
+    ) else {
         return;
     };
 
-    switches.toggle(entity);
+    if let Ok(mut switch) = switches.get_mut(entity) {
+        switch.enabled = !switch.enabled;
+    }
+}
+
+/// Clic destro su un oggetto, in simulazione: lo comanda. Per gate, deviatori,
+/// svolte, inversioni e sorgenti vuol dire fare o non fare la propria azione;
+/// per i sensori e l'antenna vuol dire dichiarare presenza anche a vuoto, che e'
+/// come si provano gli scenari che nella realta' non dovrebbero capitare.
+fn activate_by_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: Query<&Interaction>,
+    placed: Query<(Entity, &Placed, &Facing)>,
+    mut switches: Query<&mut Switch>,
+) {
+    let Some(entity) = pointed_piece(
+        MouseButton::Right,
+        &mouse,
+        &windows,
+        &camera_query,
+        &ui_interactions,
+        &placed,
+    ) else {
+        return;
+    };
+
+    if let Ok(mut switch) = switches.get_mut(entity) {
+        switch.active = !switch.active;
+    }
+}
+
+/// L'oggetto appena cliccato con quel tasto, se il clic e' caduto su uno.
+fn pointed_piece(
+    button: MouseButton,
+    mouse: &ButtonInput<MouseButton>,
+    windows: &Query<&Window>,
+    camera_query: &Query<(&Camera, &GlobalTransform)>,
+    ui_interactions: &Query<&Interaction>,
+    placed: &Query<(Entity, &Placed, &Facing)>,
+) -> Option<Entity> {
+    if !mouse.just_pressed(button) {
+        return None;
+    }
+
+    let point = cursor_world(windows, camera_query, ui_interactions)?;
+
+    clicked_piece(point, grid::cell(point), || placed.iter()).map(|(entity, _)| entity)
+}
+
+/// Il bottone che passa da un mestiere all'altro, e la barra degli strumenti che
+/// compare solo quando serve: in simulazione non si piazza niente.
+fn setup_mode_button(mut commands: Commands) {
+    commands.spawn((
+        top_button(5),
+        BackgroundColor(BUTTON_IDLE),
+        ModeButton,
+        children![(button_label(Mode::Editing.label()), ModeLabel)],
+    ));
+}
+
+fn switch_mode(
+    buttons: Query<&Interaction, (Changed<Interaction>, With<ModeButton>)>,
+    mode: Res<State<Mode>>,
+    mut next: ResMut<NextState<Mode>>,
+) {
+    let pressed = buttons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed);
+
+    if pressed {
+        next.set(mode.get().other());
+    }
+}
+
+fn show_mode(
+    mode: Res<State<Mode>>,
+    mut labels: Query<&mut Text, With<ModeLabel>>,
+    mut palette: Query<&mut Node, With<Palette>>,
+    mut selected: ResMut<SelectedTool>,
+) {
+    if !mode.is_changed() {
+        return;
+    }
+
+    for mut label in labels.iter_mut() {
+        label.0 = mode.get().label().to_string();
+    }
+    for mut node in palette.iter_mut() {
+        node.display = match mode.get() {
+            Mode::Editing => Display::Flex,
+            Mode::Simulating => Display::None,
+        };
+    }
+
+    // Tornando all'editor si riparte dallo spostamento: cosi' il primo clic non
+    // piazza per sbaglio l'oggetto che era selezionato prima.
+    if *mode.get() == Mode::Editing {
+        selected.0 = EditorTool::Pan;
+    }
 }
 
 /// Mostra sul bottone Salva com'e' andata, e dopo qualche secondo lo rimette

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::carrier::{Carrier, Heading};
 use crate::engagement::{Engaged, in_the_same_cell};
 use crate::piece::{self, Arrow, PieceShapes};
+use crate::switch::{Look, Switch};
 
 /// Dislivello fra la corsia principale e quella deviata.
 pub const LANE_HEIGHT: f32 = 64.0;
@@ -26,7 +27,6 @@ pub enum DivertKind {
 #[derive(Component)]
 pub struct Divert {
     pub kind: DivertKind,
-    pub active: bool,
     /// Se in questo istante ha un carrier nella propria cella. Lo scrive la
     /// simulazione, lo legge il colore.
     pub engaged: bool,
@@ -37,8 +37,10 @@ impl Divert {
     /// proseguire il flusso: la via dritta esiste, semplicemente non viene
     /// deviata. Dall'ATR invece non si passa, perche' quella via dritta non c'e':
     /// spento non devia piu' e i carrier si fermano davanti.
-    pub fn is_blocking(&self) -> bool {
-        !self.active && self.kind == DivertKind::Atr
+    /// Un ATR disabilitato invece non blocca niente: fuori servizio vuol dire
+    /// come se non ci fosse.
+    pub fn is_blocking(&self, switch: Switch) -> bool {
+        switch.enabled && !switch.active && self.kind == DivertKind::Atr
     }
 
     /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
@@ -69,6 +71,7 @@ impl Divert {
     /// toccati.
     pub fn catches(
         &self,
+        switch: Switch,
         position: Vec3,
         carrier: Vec3,
         facing: Heading,
@@ -98,7 +101,7 @@ impl Divert {
         // corsia, che e' lo stesso difetto in scala ridotta.
         let under_way = (DIVERT_LANE_TOLERANCE..LANE_HEIGHT).contains(&offset);
 
-        self.active || under_way
+        switch.working() || under_way
     }
 }
 
@@ -106,10 +109,6 @@ impl Divert {
 /// solo l'aspetto.
 
 impl Engaged for Divert {
-    fn active(&self) -> bool {
-        self.active
-    }
-
     fn engaged(&self) -> bool {
         self.engaged
     }
@@ -137,23 +136,16 @@ impl Plugin for DivertVisualsPlugin {
 
 #[derive(Resource)]
 pub struct DivertAssets {
-    divert_material: Handle<ColorMaterial>,
-    atr_material: Handle<ColorMaterial>,
-    /// Gli stessi due colori schiariti, per quando c'e' un carrier in mezzo.
-    divert_busy_material: Handle<ColorMaterial>,
-    atr_busy_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    divert: Look,
+    atr: Look,
 }
 
 fn setup_divert_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(DivertAssets {
-        divert_material: materials.add(Color::srgb(1.0, 0.6, 0.1)),
+        divert: Look::new(&mut materials, Color::srgb(1.0, 0.6, 0.1)),
         // Con l'orientamento i due si comportano allo stesso modo: il colore e'
         // quello che resta a distinguerli a colpo d'occhio.
-        atr_material: materials.add(Color::srgb(0.85, 0.40, 0.05)),
-        divert_busy_material: materials.add(Color::srgb(1.0, 0.85, 0.55)),
-        atr_busy_material: materials.add(Color::srgb(1.0, 0.72, 0.42)),
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        atr: Look::new(&mut materials, Color::srgb(0.85, 0.40, 0.05)),
     });
 }
 
@@ -164,35 +156,33 @@ pub fn spawn_divert(commands: &mut Commands, position: Vec3, kind: DivertKind) -
             Transform::from_translation(position),
             Divert {
                 kind,
-                active: true,
                 engaged: false,
             },
         ))
         .id()
 }
 
-fn material_for(assets: &DivertAssets, divert: &Divert) -> Handle<ColorMaterial> {
-    match (divert.active, divert.kind, divert.engaged) {
-        (false, _, _) => assets.idle_material.clone(),
-        (true, DivertKind::Divert, false) => assets.divert_material.clone(),
-        (true, DivertKind::Divert, true) => assets.divert_busy_material.clone(),
-        (true, DivertKind::Atr, false) => assets.atr_material.clone(),
-        (true, DivertKind::Atr, true) => assets.atr_busy_material.clone(),
-    }
+fn material_for(assets: &DivertAssets, divert: &Divert, switch: Switch) -> Handle<ColorMaterial> {
+    let look = match divert.kind {
+        DivertKind::Divert => &assets.divert,
+        DivertKind::Atr => &assets.atr,
+    };
+
+    look.material(switch, divert.engaged)
 }
 
 fn attach_divert_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<DivertAssets>,
-    diverts: Query<(Entity, &Divert), Without<Mesh2d>>,
+    diverts: Query<(Entity, &Divert, &Switch), Without<Mesh2d>>,
 ) {
-    for (entity, divert) in diverts.iter() {
+    for (entity, divert, switch) in diverts.iter() {
         piece::dress(
             &mut commands,
             entity,
             &shapes,
-            material_for(&assets, divert),
+            material_for(&assets, divert, *switch),
             Arrow::Deflected,
         );
     }
@@ -200,10 +190,13 @@ fn attach_divert_visuals(
 
 fn refresh_divert_colour(
     assets: Res<DivertAssets>,
-    diverts: Query<(&Divert, &mut MeshMaterial2d<ColorMaterial>), Changed<Divert>>,
+    diverts: Query<
+        (&Divert, &Switch, &mut MeshMaterial2d<ColorMaterial>),
+        Or<(Changed<Divert>, Changed<Switch>)>,
+    >,
 ) {
-    for (divert, mut material) in diverts {
-        material.0 = material_for(&assets, divert);
+    for (divert, switch, mut material) in diverts {
+        material.0 = material_for(&assets, divert, *switch);
     }
 }
 
@@ -214,10 +207,19 @@ mod tests {
     fn divert() -> Divert {
         Divert {
             kind: DivertKind::Divert,
-            active: true,
             engaged: false,
         }
     }
+
+    /// In servizio e comandato, e in servizio ma non comandato.
+    const ON: Switch = Switch {
+        enabled: true,
+        active: true,
+    };
+    const OFF: Switch = Switch {
+        enabled: true,
+        active: false,
+    };
 
     /// La fascia di aggancio copre il corridoio della manovra e niente altro:
     /// dalla linea del deviatore a quella indicata dalla freccia.
@@ -229,11 +231,12 @@ mod tests {
         let arrow = Heading::Up;
 
         assert!(
-            divert.catches(position, Vec3::ZERO, arrow, flow),
+            divert.catches(ON, position, Vec3::ZERO, arrow, flow),
             "linea del deviatore"
         );
         assert!(
             divert.catches(
+                ON,
                 position,
                 Vec3::new(-10.0, LANE_HEIGHT / 2.0, 0.0),
                 arrow,
@@ -242,11 +245,11 @@ mod tests {
             "a meta' dello spostamento"
         );
         assert!(
-            !divert.catches(position, Vec3::new(0.0, -LANE_HEIGHT, 0.0), arrow, flow),
+            !divert.catches(ON, position, Vec3::new(0.0, -LANE_HEIGHT, 0.0), arrow, flow),
             "dalla parte opposta alla freccia"
         );
         assert!(
-            !divert.catches(position, Vec3::new(60.0, 0.0, 0.0), arrow, flow),
+            !divert.catches(ON, position, Vec3::new(60.0, 0.0, 0.0), arrow, flow),
             "fuori dalla finestra di aggancio"
         );
     }
@@ -260,8 +263,8 @@ mod tests {
         let flow = Heading::Left;
         let below = Vec3::new(0.0, -LANE_HEIGHT / 2.0, 0.0);
 
-        assert!(!divert.catches(position, below, Heading::Up, flow));
-        assert!(divert.catches(position, below, Heading::Left, flow));
+        assert!(!divert.catches(ON, position, below, Heading::Up, flow));
+        assert!(divert.catches(ON, position, below, Heading::Left, flow));
     }
 
     /// La stessa freccia serve due flussi, ed e' quello che la rende leggibile:
@@ -299,51 +302,55 @@ mod tests {
         let carrier = Vec3::new(215.0, 0.0, 0.0);
 
         assert!(
-            !divert.catches(far_above, carrier, Heading::Right, Heading::Left),
+            !divert.catches(ON, far_above, carrier, Heading::Right, Heading::Left),
             "la sua diagonale non descrive questa marcia"
         );
         assert!(
-            !divert.catches(far_above, carrier, Heading::Left, Heading::Left),
+            !divert.catches(ON, far_above, carrier, Heading::Left, Heading::Left),
             "la descrive, ma il carrier e' quattro celle fuori dal corridoio"
         );
     }
 
     #[test]
     fn inactive_divert_lets_everything_through() {
-        let mut off = divert();
-        off.active = false;
+        let divert = divert();
 
-        assert!(!off.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+        assert!(!divert.catches(OFF, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
     }
 
     /// Spegnere un ATR non apre una via dritta, perche' quella via non esiste:
     /// smette di deviare e comincia a sbarrare.
     #[test]
     fn a_switched_off_atr_bars_the_way_instead_of_opening_it() {
-        let mut atr = Divert {
+        let atr = Divert {
             kind: DivertKind::Atr,
-            active: false,
             engaged: false,
         };
 
-        assert!(atr.is_blocking(), "da spento l'ATR sbarra");
+        assert!(atr.is_blocking(OFF), "non comandato, l'ATR sbarra");
         assert!(
-            !atr.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left),
+            !atr.catches(OFF, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left),
             "e quindi non devia piu'"
         );
 
-        atr.active = true;
-        assert!(!atr.is_blocking(), "acceso torna a essere un passaggio");
-        assert!(atr.catches(Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+        assert!(
+            !atr.is_blocking(ON),
+            "comandato torna a essere un passaggio"
+        );
+        assert!(atr.catches(ON, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+
+        // E fuori servizio non sbarra affatto: e' come se non ci fosse.
+        let out_of_service = Switch {
+            enabled: false,
+            active: false,
+        };
+        assert!(!atr.is_blocking(out_of_service));
     }
 
     /// Il divert spento e' invece trasparente: la via dritta c'e' e resta aperta.
     #[test]
     fn a_switched_off_divert_is_transparent() {
-        let mut off = divert();
-        off.active = false;
-
-        assert!(!off.is_blocking());
+        assert!(!divert().is_blocking(OFF));
     }
 
     /// Spegnere un deviatore mentre un carrier e' a meta' manovra non lo
@@ -352,7 +359,6 @@ mod tests {
     fn a_manoeuvre_already_begun_is_finished_anyway() {
         let mut off = Divert {
             kind: DivertKind::Atr,
-            active: false,
             engaged: false,
         };
         let position = Vec3::ZERO;
@@ -361,19 +367,19 @@ mod tests {
 
         let halfway = Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0);
         assert!(
-            off.catches(position, halfway, arrow, flow),
+            off.catches(OFF, position, halfway, arrow, flow),
             "a meta' strada la manovra prosegue"
         );
 
         let just_arriving = Vec3::new(0.0, 0.0, 0.0);
         assert!(
-            !off.catches(position, just_arriving, arrow, flow),
+            !off.catches(OFF, position, just_arriving, arrow, flow),
             "chi deve ancora cominciare non parte nemmeno"
         );
 
         // E lo stesso vale per il divert: la differenza fra i due e' cosa
         // succede a chi arriva, non a chi e' gia' dentro.
         off.kind = DivertKind::Divert;
-        assert!(off.catches(position, halfway, arrow, flow));
+        assert!(off.catches(OFF, position, halfway, arrow, flow));
     }
 }

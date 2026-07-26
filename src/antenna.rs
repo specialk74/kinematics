@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::carrier::{Carrier, Heading};
 use crate::engagement::Engaged;
 use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes};
+use crate::switch::{Look, Switch};
 
 /// Antenna di lettura: sta sotto la linea e guarda passare i carrier sopra di
 /// se'. Per ora e' solo un punto sulla mappa e non tocca il flusso in nessun
@@ -13,12 +14,9 @@ use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes};
 /// il carrier si ferma o viene deviato.
 #[derive(Component)]
 pub struct Antenna {
-    /// Antenna spenta: resta dov'e' ma diventa grigia. Cosa smetta di fare
-    /// esattamente lo dira' mqtt; per ora e' un interruttore che si vede.
-    pub active: bool,
-    /// Se in questo istante ha un carrier sopra. Lo scrive la simulazione, lo
-    /// legge l'interfaccia accendendole il bordo: cosi' il conto si fa anche
-    /// senza finestra.
+    /// Se in questo istante sta leggendo: perche' un carrier le sta davvero
+    /// sopra, o perche' un tester l'ha forzata. Lo scrive la simulazione, lo
+    /// legge l'interfaccia.
     pub seeing: bool,
 }
 
@@ -36,16 +34,18 @@ pub fn over(eye: Vec3, carrier: Vec3) -> bool {
 }
 
 impl Engaged for Antenna {
-    fn active(&self) -> bool {
-        self.active
-    }
-
     fn engaged(&self) -> bool {
         self.seeing
     }
 
     fn set_engaged(&mut self, engaged: bool) {
         self.seeing = engaged;
+    }
+
+    /// Un tester puo' farlo dichiarare presenza anche a vuoto: e' proprio il
+    /// caso che serve per provare gli scenari sbagliati.
+    fn forced_by_switch(&self) -> bool {
+        true
     }
 
     fn reaches(&self, at: Vec3, facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
@@ -65,21 +65,15 @@ impl Plugin for AntennaVisualsPlugin {
 
 #[derive(Resource)]
 pub struct AntennaAssets {
-    active_material: Handle<ColorMaterial>,
-    reading_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    look: Look,
 }
 
 fn setup_antenna_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(AntennaAssets {
-        active_material: materials.add(Color::srgb(0.30, 0.70, 0.95)),
-        // Lo stesso azzurro schiarito. Un alone verde come quello dei sensori
-        // qui non servirebbe: finirebbe accanto al verde del carrier che sta
-        // leggendo, e due verdi vicini non dicono niente.
-        reading_material: materials.add(Color::srgb(0.62, 0.92, 1.0)),
-        // Lo stesso grigio degli altri oggetti spenti: spento si legge allo
-        // stesso modo in tutta la scena.
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        // Un alone verde come quello di prima non servirebbe: finirebbe
+        // accanto al verde del carrier che sta leggendo, e due verdi vicini non
+        // dicono niente. Meglio lo stesso azzurro schiarito.
+        look: Look::new(&mut materials, Color::srgb(0.30, 0.70, 0.95)),
     });
 }
 
@@ -87,20 +81,17 @@ pub fn spawn_antenna(commands: &mut Commands, position: Vec3) -> Entity {
     commands
         .spawn((
             Transform::from_translation(position),
-            Antenna {
-                active: true,
-                seeing: false,
-            },
+            Antenna { seeing: false },
         ))
         .id()
 }
 
-fn material_for(assets: &AntennaAssets, antenna: &Antenna) -> Handle<ColorMaterial> {
-    match (antenna.active, antenna.seeing) {
-        (false, _) => assets.idle_material.clone(),
-        (true, false) => assets.active_material.clone(),
-        (true, true) => assets.reading_material.clone(),
-    }
+fn material_for(
+    assets: &AntennaAssets,
+    antenna: &Antenna,
+    switch: Switch,
+) -> Handle<ColorMaterial> {
+    assets.look.material(switch, antenna.seeing)
 }
 
 /// Un cerchio piu' largo del quadrato degli oggetti di linea: cosi' quando ci
@@ -111,12 +102,12 @@ fn attach_antenna_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<AntennaAssets>,
-    antennas: Query<(Entity, &Antenna), Without<Mesh2d>>,
+    antennas: Query<(Entity, &Antenna, &Switch), Without<Mesh2d>>,
 ) {
-    for (entity, antenna) in antennas.iter() {
+    for (entity, antenna, switch) in antennas.iter() {
         commands.entity(entity).insert((
             Mesh2d(piece::circle(&shapes)),
-            MeshMaterial2d(material_for(&assets, antenna)),
+            MeshMaterial2d(material_for(&assets, antenna, *switch)),
         ));
     }
 }
@@ -125,10 +116,13 @@ fn attach_antenna_visuals(
 /// deve sapere niente di mesh.
 fn refresh_antenna_look(
     assets: Res<AntennaAssets>,
-    antennas: Query<(&Antenna, &mut MeshMaterial2d<ColorMaterial>), Changed<Antenna>>,
+    antennas: Query<
+        (&Antenna, &Switch, &mut MeshMaterial2d<ColorMaterial>),
+        Or<(Changed<Antenna>, Changed<Switch>)>,
+    >,
 ) {
-    for (antenna, mut material) in antennas {
-        material.0 = material_for(&assets, antenna);
+    for (antenna, switch, mut material) in antennas {
+        material.0 = material_for(&assets, antenna, *switch);
     }
 }
 

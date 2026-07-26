@@ -8,6 +8,7 @@ use crate::grid;
 use crate::piece::Facing;
 use crate::reverser::Reverser;
 use crate::sensor::Sensor;
+use crate::switch::Switch;
 use crate::turner::Turner;
 
 /// Un oggetto che si accorge dei carrier che gli passano per le mani. Per ora se
@@ -15,14 +16,20 @@ use crate::turner::Turner;
 /// questo lo stato da mandare sul bus, ed e' il motivo per cui il conto si fa
 /// qui nella simulazione e non nella parte grafica.
 pub trait Engaged: Component<Mutability = Mutable> {
-    /// Un oggetto spento e' fuori servizio: non si accorge di niente.
-    fn active(&self) -> bool;
     fn engaged(&self) -> bool;
     fn set_engaged(&mut self, engaged: bool);
     /// Vero se quel carrier, in questo istante, lo riguarda. E' l'unica cosa
     /// che cambia da un oggetto all'altro: il sensore ha il suo fascio,
     /// l'antenna il suo cerchio, i deviatori la loro cella.
     fn reaches(&self, at: Vec3, facing: Heading, carrier: &Carrier, carrier_at: Vec3) -> bool;
+
+    /// Vero se per questo oggetto "attivo" vuol dire forzare il proprio
+    /// segnale invece di comandare un'azione. E' il caso dei sensori e
+    /// dell'antenna: un tester li accende a mano per far arrivare al programma
+    /// di comando una presenza che nella realta' non c'e'.
+    fn forced_by_switch(&self) -> bool {
+        false
+    }
 }
 
 /// Vero se il carrier e' nella cella dell'oggetto. E' la risposta buona per
@@ -41,13 +48,16 @@ pub fn in_the_same_cell(at: Vec3, carrier_at: Vec3) -> bool {
 /// Un sistema solo per tutti gli oggetti che sanno rispondere a `reaches`.
 pub fn mark_engaged<T: Engaged>(
     carriers: Query<(&Carrier, &Transform)>,
-    objects: Query<(&mut T, &Facing, &Transform), Without<Carrier>>,
+    objects: Query<(&mut T, &Switch, &Facing, &Transform), Without<Carrier>>,
 ) {
-    for (mut object, facing, at) in objects {
-        let engaged = object.active()
-            && carriers.iter().any(|(carrier, carrier_at)| {
-                object.reaches(at.translation, facing.0, carrier, carrier_at.translation)
-            });
+    for (mut object, switch, facing, at) in objects {
+        let really = carriers.iter().any(|(carrier, carrier_at)| {
+            object.reaches(at.translation, facing.0, carrier, carrier_at.translation)
+        });
+        // Fuori servizio non si accorge di niente. In servizio si accorge di
+        // quello che passa davvero, e i sensori anche di quello che un tester
+        // gli fa dichiarare a mano.
+        let engaged = switch.enabled && (really || (object.forced_by_switch() && switch.forcing()));
 
         // Si scrive solo quando cambia davvero: il colore si aggiorna guardando
         // `Changed<T>`, e riscriverlo ogni frame lo sveglierebbe per niente.
@@ -95,9 +105,12 @@ mod tests {
             .spawn((
                 Transform::default(),
                 Facing(Heading::Up),
+                Switch {
+                    enabled: active,
+                    active: true,
+                },
                 Divert {
                     kind: DivertKind::Divert,
-                    active,
                     engaged: false,
                 },
             ))

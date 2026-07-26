@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
 use crate::editor::{BUTTON_IDLE, PALETTE_WIDTH, button_label, top_button};
-use crate::layout::{Layout, Placed, Switches, spawn_layout};
+use crate::layout::{Layout, Placed, spawn_layout};
 use crate::name::{PieceId, PieceName};
 use crate::piece::Facing;
 use crate::simulation::SimulationState;
+use crate::switch::Switch;
 
 /// Campionamenti al secondo. Non serve seguire il frame rate: a venti al secondo
 /// il movimento e' gia' fluido e il file resta piccolo.
@@ -93,7 +94,7 @@ pub struct TraceFrame {
     /// sovrapposti. Negli istanti in cui non cambia niente il campo non viene
     /// scritto affatto.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub switches: Vec<(u32, bool)>,
+    pub switches: Vec<(u32, Switch)>,
     /// I carrier che hanno cambiato tipo, piu' quelli che compaiono adesso per
     /// la prima volta: anche entrare in scena e' un cambio, visto che prima non
     /// c'erano. Un carrier che resta com'e' non compare qui.
@@ -155,7 +156,7 @@ pub struct Recording {
     last_places: Vec<TracedCarrier>,
     /// Come erano messi gli interruttori nell'istante scritto prima: e' il
     /// termine di paragone che permette di scrivere solo i cambi.
-    last: Vec<(u32, bool)>,
+    last: Vec<(u32, Switch)>,
 }
 
 /// Gli interruttori che sono cambiati rispetto all'istante precedente. Chi non
@@ -554,20 +555,16 @@ fn stop_recording(
     }
 }
 
-/// Lo stato di tutti gli interruttori in scena, ciascuno con il suo id.
-fn switch_states(placed: &Query<(Entity, &PieceId)>, switches: &Switches) -> Vec<(u32, bool)> {
-    placed
-        .iter()
-        .filter_map(|(entity, id)| switches.get(entity).map(|active| (id.0, active)))
-        .collect()
+/// Lo stato di tutti gli oggetti in scena, ciascuno con il suo id.
+fn switch_states(objects: &Query<(&PieceId, &Switch)>) -> Vec<(u32, Switch)> {
+    objects.iter().map(|(id, switch)| (id.0, *switch)).collect()
 }
 
 fn record_frames(
     time: Res<Time>,
     mut recording: ResMut<Recording>,
     carriers: Query<(&Carrier, &Transform)>,
-    placed: Query<(Entity, &PieceId)>,
-    switches: Switches,
+    objects: Query<(&PieceId, &Switch)>,
 ) {
     if !recording.active {
         return;
@@ -579,7 +576,7 @@ fn record_frames(
     }
     recording.countdown += 1.0 / TRACE_FPS;
 
-    let now = switch_states(&placed, &switches);
+    let now = switch_states(&objects);
     let kinds_now: Vec<(u32, CarrierType)> = carriers
         .iter()
         .map(|(carrier, _)| (carrier.carrier_id, carrier.kind))
@@ -765,8 +762,7 @@ fn play_frames(
     mut next_state: ResMut<NextState<SimulationState>>,
     mut carriers: Query<(Entity, &mut Carrier)>,
     mut positions: Query<&mut Transform>,
-    placed: Query<(Entity, &PieceId)>,
-    mut switches: Switches,
+    mut objects: Query<(&PieceId, &mut Switch)>,
 ) {
     let Some(fps) = replay.trace.as_ref().map(|trace| trace.fps) else {
         return;
@@ -903,13 +899,15 @@ fn play_frames(
     // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
     // deve richiudersi anche qui, altrimenti la scena non spiega piu' la coda
     // che si vede.
-    restore(&board, &placed, &mut switches);
+    restore(&board, &mut objects);
 }
 
-fn restore(states: &[(u32, bool)], placed: &Query<(Entity, &PieceId)>, switches: &mut Switches) {
-    for (id, active) in states {
-        if let Some((entity, _)) = placed.iter().find(|(_, known)| known.0 == *id) {
-            switches.set(entity, *active);
+fn restore(states: &[(u32, Switch)], objects: &mut Query<(&PieceId, &mut Switch)>) {
+    for (id, wanted) in states {
+        for (known, mut switch) in objects.iter_mut() {
+            if known.0 == *id && *switch != *wanted {
+                *switch = *wanted;
+            }
         }
     }
 }
@@ -994,6 +992,12 @@ pub fn play_from_file(
 mod tests {
     use super::*;
 
+    /// Un oggetto in servizio ma non comandato: il gate che lascia passare.
+    const CLOSED: Switch = Switch {
+        enabled: true,
+        active: false,
+    };
+
     fn sample() -> Trace {
         Trace {
             fps: TRACE_FPS,
@@ -1004,7 +1008,7 @@ mod tests {
                     carriers: vec![TracedCarrier(1, 10.0, -20.0)],
                     gone: vec![],
                     // Il gate (1) e l'antenna che gli sta sotto (2), accesi.
-                    switches: vec![(1, true), (2, true)],
+                    switches: vec![(1, Switch::default()), (2, Switch::default())],
                     // Il carrier 1 entra in scena adesso, con la provetta.
                     kinds: vec![(1, CarrierType::WithTube)],
                 },
@@ -1014,7 +1018,7 @@ mod tests {
                     gone: vec![],
                     // Nel secondo istante e' cambiato solo il gate: l'antenna
                     // e' rimasta com'era, e infatti non compare.
-                    switches: vec![(1, false)],
+                    switches: vec![(1, CLOSED)],
                     // Il carrier ha perso la provetta per strada.
                     kinds: vec![(1, CarrierType::Empty)],
                 },
@@ -1044,7 +1048,7 @@ mod tests {
         let reread = from_ron(&to_ron(&sample()).expect("scrittura")).expect("rilettura");
         let closed = folded(&reread, 1, |frame| &frame.switches);
 
-        assert_eq!(closed, vec![(1, false), (2, true)]);
+        assert_eq!(closed, vec![(1, CLOSED), (2, Switch::default())]);
     }
 
     /// Un istante senza cambi non ha proprio il campo, e si rilegge lo stesso.
@@ -1183,10 +1187,10 @@ mod tests {
     /// senza dire niente di nuovo.
     #[test]
     fn only_the_switches_that_changed_are_written() {
-        let before = [(1, true), (2, false)];
-        let now = [(1, false), (2, false)];
+        let before = [(1, Switch::default()), (2, CLOSED)];
+        let now = [(1, CLOSED), (2, CLOSED)];
 
-        assert_eq!(changes(&now, &before), vec![(1, false)]);
+        assert_eq!(changes(&now, &before), vec![(1, CLOSED)]);
         assert!(
             changes(&now, &now).is_empty(),
             "un istante identico al precedente non scrive niente"
@@ -1205,12 +1209,12 @@ mod tests {
         let trace = sample();
 
         let start = folded(&trace, 0, |frame| &frame.switches);
-        assert_eq!(start, vec![(1, true), (2, true)]);
+        assert_eq!(start, vec![(1, Switch::default()), (2, Switch::default())]);
 
         let later = folded(&trace, 1, |frame| &frame.switches);
         assert_eq!(
             later,
-            vec![(1, false), (2, true)],
+            vec![(1, CLOSED), (2, Switch::default())],
             "il gate si e' chiuso; l'antenna non e' cambiata, ma il suo stato \
              si porta avanti lo stesso"
         );
@@ -1222,8 +1226,11 @@ mod tests {
     fn the_state_of_the_objects_travels_with_each_moment() {
         let trace = sample();
 
-        assert_eq!(trace.frames[0].switches, vec![(1, true), (2, true)]);
-        assert_eq!(trace.frames[1].switches, vec![(1, false)]);
+        assert_eq!(
+            trace.frames[0].switches,
+            vec![(1, Switch::default()), (2, Switch::default())]
+        );
+        assert_eq!(trace.frames[1].switches, vec![(1, CLOSED)]);
 
         let reread = from_ron(&to_ron(&trace).expect("scrittura")).expect("rilettura");
 

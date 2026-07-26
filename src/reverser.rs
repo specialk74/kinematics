@@ -6,6 +6,7 @@ use crate::carrier::{Carrier, Heading, Motion};
 use crate::engagement::{Engaged, in_the_same_cell};
 use crate::grid::GRID_STEP;
 use crate::piece::{self, Arrow, PieceShapes};
+use crate::switch::{Look, Switch};
 
 /// Raggio della curva: mezza cella, cosi' la semicirconferenza porta il carrier
 /// esattamente una cella piu' in basso.
@@ -20,8 +21,8 @@ pub const TURN_RADIUS: f32 = GRID_STEP / 2.0;
 /// esce una cella piu' a sinistra.
 #[derive(Component)]
 pub struct Reverser {
-    pub active: bool,
-    /// Se in questo istante ha un carrier fra le mani. Lo scrive la simulazione, lo legge il colore.
+    /// Se in questo istante ha un carrier fra le mani. Lo scrive la
+    /// simulazione, lo legge il colore.
     pub engaged: bool,
 }
 
@@ -42,10 +43,6 @@ impl Reverser {
 }
 
 impl Engaged for Reverser {
-    fn active(&self) -> bool {
-        self.active
-    }
-
     fn engaged(&self) -> bool {
         self.engaged
     }
@@ -73,18 +70,12 @@ impl Plugin for ReverserVisualsPlugin {
 
 #[derive(Resource)]
 pub struct ReverserAssets {
-    active_material: Handle<ColorMaterial>,
-    /// Lo stesso colore schiarito, per quando c'e' un carrier in mezzo.
-    busy_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    look: Look,
 }
 
 fn setup_reverser_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(ReverserAssets {
-        // Rombo: distinto da triangoli, quadrati, sbarre e cerchi.
-        active_material: materials.add(Color::srgb(0.65, 0.30, 0.95)),
-        busy_material: materials.add(Color::srgb(0.85, 0.68, 1.0)),
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        look: Look::new(&mut materials, Color::srgb(0.65, 0.30, 0.95)),
     });
 }
 
@@ -92,34 +83,31 @@ pub fn spawn_reverser(commands: &mut Commands, position: Vec3) -> Entity {
     commands
         .spawn((
             Transform::from_translation(position),
-            Reverser {
-                active: true,
-                engaged: false,
-            },
+            Reverser { engaged: false },
         ))
         .id()
 }
 
-fn material_for(assets: &ReverserAssets, reverser: &Reverser) -> Handle<ColorMaterial> {
-    match (reverser.active, reverser.engaged) {
-        (false, _) => assets.idle_material.clone(),
-        (true, false) => assets.active_material.clone(),
-        (true, true) => assets.busy_material.clone(),
-    }
+fn material_for(
+    assets: &ReverserAssets,
+    reverser: &Reverser,
+    switch: Switch,
+) -> Handle<ColorMaterial> {
+    assets.look.material(switch, reverser.engaged)
 }
 
 fn attach_reverser_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<ReverserAssets>,
-    reversers: Query<(Entity, &Reverser), Without<Mesh2d>>,
+    reversers: Query<(Entity, &Reverser, &Switch), Without<Mesh2d>>,
 ) {
-    for (entity, reverser) in reversers.iter() {
+    for (entity, reverser, switch) in reversers.iter() {
         piece::dress(
             &mut commands,
             entity,
             &shapes,
-            material_for(&assets, reverser),
+            material_for(&assets, reverser, *switch),
             Arrow::Curved,
         );
     }
@@ -127,10 +115,13 @@ fn attach_reverser_visuals(
 
 fn refresh_reverser_colour(
     assets: Res<ReverserAssets>,
-    reversers: Query<(&Reverser, &mut MeshMaterial2d<ColorMaterial>), Changed<Reverser>>,
+    reversers: Query<
+        (&Reverser, &Switch, &mut MeshMaterial2d<ColorMaterial>),
+        Or<(Changed<Reverser>, Changed<Switch>)>,
+    >,
 ) {
-    for (reverser, mut material) in reversers {
-        material.0 = material_for(&assets, reverser);
+    for (reverser, switch, mut material) in reversers {
+        material.0 = material_for(&assets, reverser, *switch);
     }
 }
 
@@ -139,10 +130,7 @@ mod tests {
     use super::*;
 
     fn reverser() -> Reverser {
-        Reverser {
-            active: true,
-            engaged: false,
-        }
+        Reverser { engaged: false }
     }
 
     /// Il caso di partenza: chi va a sinistra e curva in antiorario esce verso

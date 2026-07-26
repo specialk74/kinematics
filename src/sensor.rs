@@ -4,6 +4,7 @@ use crate::carrier::{COLLAR_RADIUS, Carrier, CarrierType, Heading};
 use crate::engagement::Engaged;
 use crate::grid::GRID_STEP;
 use crate::piece::{self, Arrow, PieceShapes};
+use crate::switch::{Look, Switch};
 
 /// Che cosa guarda il sensore. E' l'unica differenza fra i due: la zona che
 /// sorvegliano e il modo in cui si accendono sono gli stessi.
@@ -20,10 +21,10 @@ pub enum SensorKind {
 #[derive(Component)]
 pub struct Sensor {
     pub kind: SensorKind,
-    /// Spento vuol dire fuori servizio: resta grigio e non vede niente.
-    pub active: bool,
-    /// Se in questo istante ha un carrier davanti. Lo scrive la simulazione,
-    /// lo legge l'interfaccia: cosi' il conto si fa anche senza finestra.
+    /// Se in questo istante dichiara presenza: perche' un carrier gli passa
+    /// davvero davanti, o perche' un tester lo ha forzato. Lo scrive la
+    /// simulazione, lo legge l'interfaccia: cosi' il conto si fa anche senza
+    /// finestra.
     pub seeing: bool,
 }
 
@@ -37,16 +38,18 @@ impl Sensor {
 }
 
 impl Engaged for Sensor {
-    fn active(&self) -> bool {
-        self.active
-    }
-
     fn engaged(&self) -> bool {
         self.seeing
     }
 
     fn set_engaged(&mut self, engaged: bool) {
         self.seeing = engaged;
+    }
+
+    /// Un tester puo' farlo dichiarare presenza anche a vuoto: e' proprio il
+    /// caso che serve per provare gli scenari sbagliati.
+    fn forced_by_switch(&self) -> bool {
+        true
     }
 
     fn reaches(&self, at: Vec3, facing: Heading, carrier: &Carrier, carrier_at: Vec3) -> bool {
@@ -79,22 +82,14 @@ impl Plugin for SensorVisualsPlugin {
 
 #[derive(Resource)]
 pub struct SensorAssets {
-    tube_material: Handle<ColorMaterial>,
-    carrier_material: Handle<ColorMaterial>,
-    /// Gli stessi due colori schiariti: mentre il sensore lavora la sua sbarra
-    /// si accende, e resta riconoscibile qual e' dei due.
-    tube_reading_material: Handle<ColorMaterial>,
-    carrier_reading_material: Handle<ColorMaterial>,
-    idle_material: Handle<ColorMaterial>,
+    tube: Look,
+    carrier: Look,
 }
 
 fn setup_sensor_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(SensorAssets {
-        tube_material: materials.add(Color::srgb(0.95, 0.80, 0.20)),
-        carrier_material: materials.add(Color::srgb(0.10, 0.75, 0.80)),
-        tube_reading_material: materials.add(Color::srgb(1.0, 0.97, 0.62)),
-        carrier_reading_material: materials.add(Color::srgb(0.48, 0.97, 1.0)),
-        idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
+        tube: Look::new(&mut materials, Color::srgb(0.95, 0.80, 0.20)),
+        carrier: Look::new(&mut materials, Color::srgb(0.10, 0.75, 0.80)),
     });
 }
 
@@ -104,39 +99,34 @@ pub fn spawn_sensor(commands: &mut Commands, position: Vec3, kind: SensorKind) -
             Transform::from_translation(position),
             Sensor {
                 kind,
-                active: true,
                 seeing: false,
             },
         ))
         .id()
 }
 
-fn material_for(assets: &SensorAssets, sensor: &Sensor) -> Handle<ColorMaterial> {
-    if !sensor.active {
-        return assets.idle_material.clone();
-    }
+fn material_for(assets: &SensorAssets, sensor: &Sensor, switch: Switch) -> Handle<ColorMaterial> {
+    let look = match sensor.kind {
+        SensorKind::Tube => &assets.tube,
+        SensorKind::Carrier => &assets.carrier,
+    };
 
-    match (sensor.kind, sensor.seeing) {
-        (SensorKind::Tube, false) => assets.tube_material.clone(),
-        (SensorKind::Tube, true) => assets.tube_reading_material.clone(),
-        (SensorKind::Carrier, false) => assets.carrier_material.clone(),
-        (SensorKind::Carrier, true) => assets.carrier_reading_material.clone(),
-    }
+    look.material(switch, sensor.seeing)
 }
 
 fn attach_sensor_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<SensorAssets>,
-    sensors: Query<(Entity, &Sensor), Without<Mesh2d>>,
+    sensors: Query<(Entity, &Sensor, &Switch), Without<Mesh2d>>,
 ) {
-    for (entity, sensor) in sensors.iter() {
+    for (entity, sensor, switch) in sensors.iter() {
         piece::dress_shape(
             &mut commands,
             entity,
             &shapes,
             piece::bar(&shapes),
-            material_for(&assets, sensor),
+            material_for(&assets, sensor, *switch),
             Arrow::None,
         );
     }
@@ -146,10 +136,13 @@ fn attach_sensor_visuals(
 /// o passa davanti non deve sapere niente di mesh.
 fn refresh_sensor_look(
     assets: Res<SensorAssets>,
-    sensors: Query<(&Sensor, &mut MeshMaterial2d<ColorMaterial>), Changed<Sensor>>,
+    sensors: Query<
+        (&Sensor, &Switch, &mut MeshMaterial2d<ColorMaterial>),
+        Or<(Changed<Sensor>, Changed<Switch>)>,
+    >,
 ) {
-    for (sensor, mut material) in sensors {
-        material.0 = material_for(&assets, sensor);
+    for (sensor, switch, mut material) in sensors {
+        material.0 = material_for(&assets, sensor, *switch);
     }
 }
 
@@ -162,7 +155,7 @@ mod tests {
     /// Fa girare il sistema vero su una scena minima: un sensore e un carrier
     /// nella stessa cella. E' l'unico modo di verificare quello che conta
     /// davvero, cioe' che il sensore si accenda per chi deve e per nessun altro.
-    fn sees(kind: SensorKind, active: bool, passing: CarrierType) -> bool {
+    fn sees_with(kind: SensorKind, switch: Switch, carrier: Option<CarrierType>) -> bool {
         let mut app = App::new();
         app.add_plugins(crate::engagement::EngagementPlugin);
 
@@ -171,9 +164,45 @@ mod tests {
             .spawn((
                 Transform::default(),
                 Facing(Heading::Up),
+                switch,
                 Sensor {
                     kind,
-                    active,
+                    seeing: false,
+                },
+            ))
+            .id();
+        if let Some(kind) = carrier {
+            app.world_mut().spawn((
+                Transform::default(),
+                Carrier {
+                    kind,
+                    carrier_id: 1,
+                    sample_id: None,
+                    motion: Motion::Straight(Heading::Left),
+                },
+            ));
+        }
+
+        app.update();
+
+        app.world().get::<Sensor>(sensor).expect("sensore").seeing
+    }
+
+    fn sees(kind: SensorKind, enabled: bool, passing: CarrierType) -> bool {
+        let mut app = App::new();
+        app.add_plugins(crate::engagement::EngagementPlugin);
+
+        let sensor = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Facing(Heading::Up),
+                Switch {
+                    enabled,
+                    active: false,
+                },
+                Sensor {
+                    kind,
                     seeing: false,
                 },
             ))
@@ -206,6 +235,47 @@ mod tests {
         assert!(sees(SensorKind::Carrier, true, CarrierType::Empty));
     }
 
+    /// Il punto di tutto il simulatore: un tester puo' far dichiarare al
+    /// sensore una presenza che non c'e', per vedere come reagisce il programma
+    /// che sta collaudando. E un sensore fuori servizio non dichiara niente
+    /// nemmeno se lo si forza.
+    #[test]
+    fn a_forced_sensor_reports_a_presence_that_is_not_there() {
+        let forced = Switch {
+            enabled: true,
+            active: true,
+        };
+        let honest = Switch {
+            enabled: true,
+            active: false,
+        };
+        let out_of_service = Switch {
+            enabled: false,
+            active: true,
+        };
+
+        assert!(
+            sees_with(SensorKind::Tube, forced, None),
+            "forzato dichiara presenza a vuoto"
+        );
+        assert!(
+            !sees_with(SensorKind::Tube, honest, None),
+            "non forzato dice la verita': non c'e' nessuno"
+        );
+        assert!(
+            !sees_with(SensorKind::Tube, out_of_service, None),
+            "fuori servizio non dichiara niente, nemmeno forzato"
+        );
+        assert!(
+            !sees_with(
+                SensorKind::Tube,
+                out_of_service,
+                Some(CarrierType::WithTube)
+            ),
+            "e nemmeno quando davanti ci passa davvero qualcuno"
+        );
+    }
+
     /// Spento vuol dire fuori servizio: non vede niente, nemmeno quello che
     /// gli passa davanti.
     #[test]
@@ -217,7 +287,6 @@ mod tests {
     fn sensor(kind: SensorKind) -> Sensor {
         Sensor {
             kind,
-            active: true,
             seeing: false,
         }
     }

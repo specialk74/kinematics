@@ -4,6 +4,8 @@ use crate::carrier::{CARRIER_RADIUS, Carrier};
 use crate::geometry::circle_touches_box;
 use crate::piece::{self, Arrow, PIECE_SIZE, PieceShapes};
 use crate::simulation::SimulationState;
+use crate::switch::Look;
+use crate::switch::Switch;
 
 /// Uscita dal sistema: il carrier che la tocca smette di esistere. Senza
 /// nessuna uscita piazzata i carrier proseguono verso sinistra all'infinito.
@@ -27,18 +29,18 @@ pub struct DespawnerVisualsPlugin;
 impl Plugin for DespawnerVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_despawner_assets)
-            .add_systems(Update, attach_despawner_visuals);
+            .add_systems(Update, (attach_despawner_visuals, refresh_despawner_colour));
     }
 }
 
 #[derive(Resource)]
 pub struct DespawnerAssets {
-    material: Handle<ColorMaterial>,
+    look: Look,
 }
 
 fn setup_despawner_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(DespawnerAssets {
-        material: materials.add(Color::srgb(0.55, 0.10, 0.10)),
+        look: Look::new(&mut materials, Color::srgb(0.55, 0.10, 0.10)),
     });
 }
 
@@ -52,16 +54,28 @@ fn attach_despawner_visuals(
     mut commands: Commands,
     shapes: Res<PieceShapes>,
     assets: Res<DespawnerAssets>,
-    despawners: Query<Entity, (With<Despawner>, Without<Mesh2d>)>,
+    despawners: Query<(Entity, &Switch), (With<Despawner>, Without<Mesh2d>)>,
 ) {
-    for entity in despawners.iter() {
+    for (entity, switch) in despawners.iter() {
         piece::dress(
             &mut commands,
             entity,
             &shapes,
-            assets.material.clone(),
+            assets.look.material(*switch, false),
             Arrow::Stop,
         );
+    }
+}
+
+fn refresh_despawner_colour(
+    assets: Res<DespawnerAssets>,
+    despawners: Query<
+        (&Switch, &mut MeshMaterial2d<ColorMaterial>),
+        (With<Despawner>, Changed<Switch>),
+    >,
+) {
+    for (switch, mut material) in despawners {
+        material.0 = assets.look.material(*switch, false);
     }
 }
 
@@ -78,12 +92,16 @@ fn swallows(despawner: Vec3, carrier: Vec3) -> bool {
 fn despawn_on_contact(
     mut commands: Commands,
     carriers: Query<(Entity, &Transform), With<Carrier>>,
-    despawners: Query<&Transform, (With<Despawner>, Without<Carrier>)>,
+    despawners: Query<(&Switch, &Transform), (With<Despawner>, Without<Carrier>)>,
 ) {
     for (entity, carrier) in carriers.iter() {
+        // Un'uscita fuori servizio o non comandata lascia proseguire: e' il modo
+        // di provare cosa fa il programma di comando quando l'impianto non
+        // smaltisce piu'.
         let swallowed = despawners
             .iter()
-            .any(|despawner| swallows(despawner.translation, carrier.translation));
+            .filter(|(switch, _)| switch.working())
+            .any(|(_, despawner)| swallows(despawner.translation, carrier.translation));
 
         if swallowed {
             commands.entity(entity).despawn();
