@@ -107,7 +107,7 @@ impl Plugin for EngagementPlugin {
 mod tests {
     use super::*;
     use crate::carrier::{CarrierType, Motion};
-    use crate::divert::DivertKind;
+    use crate::divert::{DivertKind, LANE_HEIGHT};
     use crate::grid::GRID_STEP;
 
     /// Fa girare il sistema vero: un divert e un carrier, e si guarda se il
@@ -168,6 +168,12 @@ mod tests {
         assert!(
             !engaged_with(true, Vec3::ZERO, CarrierType::Empty),
             "un vuoto passa dritto, quindi il divert non sta agendo su di lui"
+        );
+        // Ne' uno che sta gia' viaggiando nella corsia di arrivo: e' dentro il
+        // corridoio della manovra, ma non c'e' piu' niente da spostare.
+        assert!(
+            !engaged(true, Vec3::new(0.0, LANE_HEIGHT, 0.0)),
+            "chi e' gia' arrivato non lo riguarda piu'"
         );
     }
 

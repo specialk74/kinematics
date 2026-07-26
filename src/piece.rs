@@ -145,6 +145,8 @@ fn guide_corridor() -> Mesh {
 const DIVERT_PATH: f32 = 5.0;
 const DIVERT_HEAD: f32 = 15.0;
 const DIVERT_HEAD_WIDTH: f32 = 16.0;
+/// In quanti tratti si spezza l'arco: abbastanza da non vedere gli spigoli.
+const DIVERT_STEPS: usize = 14;
 
 /// Un segmento spesso fra due punti: serve alle diagonali, che un rettangolo
 /// dritto non sa fare.
@@ -186,15 +188,35 @@ fn divert_glyph(in_the_next_lane: bool) -> Mesh {
 
     let from = Vec2::new(half, -half + lane);
     let to = Vec2::new(-half, half + lane);
-    let along = (to - from).normalize_or_zero();
+    // Il carrier taglia la cella passando per la meta' dei due lati: una retta
+    // da spigolo a spigolo gli finirebbe sotto. L'arco si incurva dalla parte
+    // opposta al suo tragitto e gli lascia la strada libera.
+    let bulge = Vec2::new(half, half + lane);
+    let on_arc = |t: f32| {
+        let u = 1.0 - t;
 
-    // Lo stelo si ferma dove comincia la punta, altrimenti la trapasserebbe.
-    thick_segment(&mut points, from, to - along * DIVERT_HEAD, DIVERT_PATH);
+        from * (u * u) + bulge * (2.0 * u * t) + to * (t * t)
+    };
+
+    // Ci si ferma prima della fine: l'ultimo tratto e' la punta.
+    let tip = on_arc(1.0);
+    let neck = on_arc(1.0 - DIVERT_HEAD / from.distance(to));
+    let mut previous = on_arc(0.0);
+    for step in 1..=DIVERT_STEPS {
+        let next = on_arc(step as f32 / DIVERT_STEPS as f32);
+        if next.distance(tip) < neck.distance(tip) {
+            break;
+        }
+
+        thick_segment(&mut points, previous, next, DIVERT_PATH);
+        previous = next;
+    }
+    thick_segment(&mut points, previous, neck, DIVERT_PATH);
 
     // La punta, sull'estremita' verso cui il carrier viene spostato.
-    let neck = to - along * DIVERT_HEAD;
+    let along = (tip - neck).normalize_or_zero();
     let across = Vec2::new(-along.y, along.x) * DIVERT_HEAD_WIDTH / 2.0;
-    for point in [neck + across, neck - across, to] {
+    for point in [neck + across, neck - across, tip] {
         points.push([point.x, point.y, 0.0]);
     }
 

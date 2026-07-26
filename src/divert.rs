@@ -69,6 +69,22 @@ impl Divert {
         }
     }
 
+    /// Quanto manca ancora al carrier per arrivare nella corsia di destinazione,
+    /// se questo deviatore lo sta portando. Zero vuol dire che c'e' gia': e'
+    /// nel corridoio della manovra ma non c'e' piu' niente da spostare.
+    pub fn still_to_go(
+        &self,
+        position: Vec3,
+        carrier: Vec3,
+        facing: Heading,
+        heading: Heading,
+    ) -> Option<f32> {
+        let shift = Divert::shift(facing, heading)?;
+        let offset = (carrier.truncate() - position.truncate()).dot(shift.as_vec());
+
+        Some((LANE_HEIGHT - offset).max(0.0))
+    }
+
     /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
     ///
     /// La freccia disegnata e' la **diagonale** fra `facing` e la sua sinistra,
@@ -159,7 +175,17 @@ impl Engaged for Divert {
             return false;
         };
 
-        self.takes(carrier.kind) && self.catches(switch, at, carrier_at, facing, heading)
+        // Il corridoio della manovra arriva fino alla corsia di destinazione,
+        // quindi comprende anche chi ci sta gia' viaggiando dentro: quello e'
+        // agganciato ma non viene spostato di un millimetro, e non deve far
+        // accendere niente. Si accende solo se c'e' ancora strada da fargli fare.
+        let arriving = self
+            .still_to_go(at, carrier_at, facing, heading)
+            .is_some_and(|left| left > DIVERT_LANE_TOLERANCE);
+
+        arriving
+            && self.takes(carrier.kind)
+            && self.catches(switch, at, carrier_at, facing, heading)
     }
 }
 

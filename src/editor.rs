@@ -587,10 +587,23 @@ pub fn button_label(text: &str) -> (Text, TextFont, TextColor) {
 /// seguirebbero il tema e la scala di chi usa il programma.
 fn follow_tool_with_cursor(
     mut commands: Commands,
+    mode: Res<State<Mode>>,
     selected: Res<SelectedTool>,
     windows: Query<Entity, With<Window>>,
 ) {
-    if !selected.is_changed() {
+    if !selected.is_changed() && !mode.is_changed() {
+        return;
+    }
+
+    // In simulazione lo strumento scelto nell'editor non conta piu': si comanda
+    // e si trascina, quindi la manina. Senza questo restava il cursore
+    // dell'ultimo strumento usato, che prometteva un'azione che li' non esiste.
+    if *mode.get() == Mode::Simulating {
+        for window in windows.iter() {
+            commands
+                .entity(window)
+                .insert(CursorIcon::System(SystemCursorIcon::Grab));
+        }
         return;
     }
 
@@ -629,14 +642,16 @@ fn update_ghost(
     ghost_material: Res<GhostMaterial>,
     shapes: Res<PieceShapes>,
     ui_interactions: Query<&Interaction>,
+    mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     pending: Res<PendingFacing>,
     mut ghost: Query<(Entity, &Ghost, &mut Transform, &mut Visibility)>,
 ) {
-    // Niente anteprima in modo "Sposta" ne' durante una riproduzione: in
-    // entrambi i casi il clic non piazzerebbe nulla, e mostrare dove finirebbe
-    // sarebbe una promessa falsa.
-    let replaying = *state.get() == SimulationState::Replaying;
+    // Niente anteprima in modo "Sposta", fuori dall'editor o durante una
+    // riproduzione: in tutti questi casi il clic non piazzerebbe nulla, e
+    // mostrare dove finirebbe sarebbe una promessa falsa. Restava in scena la
+    // sagoma dell'ultimo oggetto che si stava piazzando.
+    let replaying = *state.get() == SimulationState::Replaying || *mode.get() != Mode::Editing;
     let target = match (
         selected.0,
         cursor_cell(&windows, &camera_query, &ui_interactions),
