@@ -21,7 +21,17 @@ pub trait Engaged: Component<Mutability = Mutable> {
     /// Vero se quel carrier, in questo istante, lo riguarda. E' l'unica cosa
     /// che cambia da un oggetto all'altro: il sensore ha il suo fascio,
     /// l'antenna il suo cerchio, i deviatori la loro cella.
-    fn reaches(&self, at: Vec3, facing: Heading, carrier: &Carrier, carrier_at: Vec3) -> bool;
+    /// L'interruttore arriva fin qui perche' per alcuni oggetti "sto agendo"
+    /// dipende anche da come sono comandati: un divert non comandato lascia
+    /// proseguire dritto, e non sta agendo su nessuno.
+    fn reaches(
+        &self,
+        switch: Switch,
+        at: Vec3,
+        facing: Heading,
+        carrier: &Carrier,
+        carrier_at: Vec3,
+    ) -> bool;
 
     /// Vero se per questo oggetto "attivo" vuol dire forzare il proprio
     /// segnale invece di comandare un'azione. E' il caso dei sensori e
@@ -32,15 +42,15 @@ pub trait Engaged: Component<Mutability = Mutable> {
     }
 }
 
-/// Vero se il carrier e' nella cella dell'oggetto. E' la risposta buona per
-/// deviatori, svolte e inversioni: dice "ce l'ho fra le mani", che e' quanto
-/// serve a farli accendere.
+/// Vero se il carrier e' nella cella dell'oggetto. La usano svolta e
+/// inversione, la cui azione dura un frame solo - l'istante in cui cambiano la
+/// marcia al carrier: accendersi solo li' sarebbe un lampo invisibile, quindi
+/// per loro "ce l'ho fra le mani" resta la risposta buona.
 ///
-/// E' pero' una approssimazione, e va saputo: un carrier che attraversa la
-/// cella di un divert spento, o che ci passa in un verso che quel divert non
-/// tocca, accende comunque l'oggetto. La condizione vera - "sto agendo su di
-/// lui" - e' diversa per ciascuno e andra' scritta quando serviranno i
-/// messaggi veri, non il colore.
+/// I deviatori invece hanno una condizione vera e duratura - `catches` - e
+/// usano quella: prima si accendevano anche per un carrier che attraversava la
+/// loro cella senza che loro lo toccassero, e sembravano al lavoro mentre non
+/// facevano niente.
 pub fn in_the_same_cell(at: Vec3, carrier_at: Vec3) -> bool {
     grid::cell(at.truncate()) == grid::cell(carrier_at.truncate())
 }
@@ -52,7 +62,13 @@ pub fn mark_engaged<T: Engaged>(
 ) {
     for (mut object, switch, facing, at) in objects {
         let really = carriers.iter().any(|(carrier, carrier_at)| {
-            object.reaches(at.translation, facing.0, carrier, carrier_at.translation)
+            object.reaches(
+                *switch,
+                at.translation,
+                facing.0,
+                carrier,
+                carrier_at.translation,
+            )
         });
         // Fuori servizio non si accorge di niente. In servizio si accorge di
         // quello che passa davvero, e i sensori anche di quello che un tester
@@ -131,12 +147,18 @@ mod tests {
     }
 
     #[test]
-    fn an_object_notices_the_carrier_in_its_own_cell() {
+    fn an_object_notices_the_carrier_it_is_moving() {
         assert!(engaged(true, Vec3::ZERO));
-        assert!(engaged(true, Vec3::new(GRID_STEP / 2.0 - 1.0, 0.0, 0.0)));
         assert!(
             !engaged(true, Vec3::new(GRID_STEP, 0.0, 0.0)),
             "quello nella cella accanto non lo riguarda"
+        );
+        // Un deviatore si accende solo mentre sta agganciando: un carrier che
+        // gli attraversa la cella fuori dalla sua finestra di presa non lo
+        // riguarda, e prima lo faceva sembrare al lavoro mentre non lo era.
+        assert!(
+            !engaged(true, Vec3::new(GRID_STEP / 2.0 - 1.0, 0.0, 0.0)),
+            "di lato alla finestra di presa non lo tocca"
         );
     }
 

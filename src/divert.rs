@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
 use crate::editor::Tool;
-use crate::engagement::{Engaged, in_the_same_cell};
+use crate::engagement::Engaged;
 use crate::piece::{self, PieceShapes};
 use crate::switch::{Look, Switch};
 
@@ -129,11 +129,23 @@ impl Engaged for Divert {
         self.engaged = engaged;
     }
 
-    fn reaches(&self, at: Vec3, _facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
-        // Per ora: "ho un carrier nella mia cella". La condizione vera, quella
-        // che dira' a mqtt "sto agendo su questo carrier", e' diversa per
-        // ciascuno e verra' quando serviranno i messaggi e non il colore.
-        in_the_same_cell(at, carrier_at)
+    fn reaches(
+        &self,
+        switch: Switch,
+        at: Vec3,
+        facing: Heading,
+        carrier: &Carrier,
+        carrier_at: Vec3,
+    ) -> bool {
+        // La condizione vera: sto spostando proprio questo carrier. Un carrier
+        // che passa per la cella senza essere agganciato - perche' arriva da un
+        // verso che non tocco, o perche' non sono comandato - non mi riguarda,
+        // e non devo accendermi per lui.
+        let Some(heading) = carrier.motion.heading() else {
+            return false;
+        };
+
+        self.catches(switch, at, carrier_at, facing, heading)
     }
 }
 

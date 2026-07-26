@@ -1,4 +1,4 @@
-use std::f32::consts::{FRAC_PI_4, PI};
+use std::f32::consts::PI;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
@@ -62,11 +62,6 @@ pub enum Arrow {
     None,
     /// Dritta: il carrier prosegue di li'.
     Straight,
-    /// A quarantacinque gradi: e' la traiettoria del carrier deviato, cioe' la
-    /// diagonale fra la sua marcia e lo spostamento di lato. Il deviatore la
-    /// legge come tale, quindi la freccia dice il vero da qualunque parte
-    /// arrivi il flusso.
-    Deflected,
     /// Arcuata: il carrier torna indietro girando.
     Curved,
     /// Un quadrato nero: il carrier finisce li' e basta, da qualunque parte
@@ -94,6 +89,8 @@ pub struct PieceShapes {
     circle: Handle<Mesh>,
     bar: Handle<Mesh>,
     guide_line: Handle<Mesh>,
+    divert: Handle<Mesh>,
+    atr: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
     curved_arrow: Handle<Mesh>,
     stop: Handle<Mesh>,
@@ -135,6 +132,70 @@ fn guide_corridor() -> Mesh {
             [half, top, 0.0],
             [-half, top, 0.0],
         ]);
+    }
+
+    triangles(points)
+}
+
+/// Spessore della traiettoria disegnata dentro il divert, e misure della punta
+/// che ne indica il verso. Senza la punta un divert girato in un verso e uno
+/// girato nel verso opposto si disegnerebbero uguali - un segmento ruotato di
+/// mezzo giro e' se stesso - e uno dei due non aggancia il flusso: si finiva
+/// per guardare un oggetto che sembrava a posto e non faceva niente.
+const DIVERT_PATH: f32 = 5.0;
+const DIVERT_HEAD: f32 = 15.0;
+const DIVERT_HEAD_WIDTH: f32 = 16.0;
+
+/// Un segmento spesso fra due punti: serve alle diagonali, che un rettangolo
+/// dritto non sa fare.
+fn thick_segment(points: &mut Vec<[f32; 3]>, from: Vec2, to: Vec2, width: f32) {
+    let along = (to - from).normalize_or_zero();
+    let across = Vec2::new(-along.y, along.x) * width / 2.0;
+
+    for corner in [
+        [from + across, from - across, to - across],
+        [from + across, to - across, to + across],
+    ] {
+        points.extend(corner.map(|point| [point.x, point.y, 0.0]));
+    }
+}
+
+/// Il divert e l'ATR: una diagonale sola, da spigolo a spigolo, nel verso in cui
+/// l'oggetto sposta il carrier.
+///
+/// Cambia la cella in cui viene disegnata, e non e' un dettaglio: sta sempre
+/// nella **corsia secondaria**, quella fuori dal flusso principale. Il divert
+/// vive nella corsia principale, quindi la sua diagonale finisce nella cella
+/// accanto; l'ATR vive gia' nella secondaria, quindi la sua sta in casa propria.
+/// Sono due oggetti che fanno il contrario l'uno dell'altro, e il disegno lo
+/// dice invece di lasciarlo capire dal colore.
+///
+/// Non c'e' nessun bordo di corsia: quelli li disegnano i pezzi di guida, che
+/// l'utente mette dove servono. Provandoci, il bordo finiva di traverso alla
+/// corsia in due orientamenti su quattro - un oggetto serve due flussi diversi
+/// a seconda di come lo si gira, e una riga sola non puo' essere giusta per
+/// tutti e due. La diagonale invece lo e': girata segue sempre lo spostamento.
+///
+/// Divert e ATR condividono la figura perche' condividono il movimento: a
+/// distinguerli sono il colore e il verso in cui li si gira.
+fn divert_glyph(in_the_next_lane: bool) -> Mesh {
+    let half = GRID_STEP / 2.0;
+    // Il divert disegna una corsia piu' in la', l'ATR in casa propria.
+    let lane = if in_the_next_lane { GRID_STEP } else { 0.0 };
+    let mut points = Vec::new();
+
+    let from = Vec2::new(half, -half + lane);
+    let to = Vec2::new(-half, half + lane);
+    let along = (to - from).normalize_or_zero();
+
+    // Lo stelo si ferma dove comincia la punta, altrimenti la trapasserebbe.
+    thick_segment(&mut points, from, to - along * DIVERT_HEAD, DIVERT_PATH);
+
+    // La punta, sull'estremita' verso cui il carrier viene spostato.
+    let neck = to - along * DIVERT_HEAD;
+    let across = Vec2::new(-along.y, along.x) * DIVERT_HEAD_WIDTH / 2.0;
+    for point in [neck + across, neck - across, to] {
+        points.push([point.x, point.y, 0.0]);
     }
 
     triangles(points)
@@ -216,6 +277,8 @@ fn setup_piece_shapes(
         circle: meshes
             .add(Mesh::from(Circle::new(ANTENNA_RADIUS)).translated_by(Vec3::Y * ANTENNA_OFFSET)),
         guide_line: meshes.add(guide_corridor()),
+        divert: meshes.add(divert_glyph(true)),
+        atr: meshes.add(divert_glyph(false)),
         // La sbarra e' spostata nella mesh stessa e non nel Transform: la
         // posizione dell'oggetto resta il centro della cella, che e' quello che
         // sanno la griglia, il salvataggio e il trascinamento.
@@ -266,7 +329,10 @@ pub fn dressing(shapes: &PieceShapes, tool: Tool) -> (Handle<Mesh>, Arrow) {
     match tool {
         Tool::CarrierSource => (shapes.square.clone(), Arrow::Straight),
         Tool::Gate => (shapes.bar.clone(), Arrow::None),
-        Tool::Divert | Tool::Atr => (shapes.square.clone(), Arrow::Deflected),
+        // La traiettoria e' dentro la figura: una freccia in piu' direbbe la
+        // stessa cosa due volte.
+        Tool::Divert => (shapes.divert.clone(), Arrow::None),
+        Tool::Atr => (shapes.atr.clone(), Arrow::None),
         Tool::Despawner => (shapes.square.clone(), Arrow::Stop),
         Tool::Turner => (shapes.square.clone(), Arrow::Straight),
         Tool::Reverser => (shapes.square.clone(), Arrow::Curved),
@@ -297,11 +363,6 @@ pub fn dress_shape(
             shapes.straight_arrow.clone(),
             shapes.arrow_material.clone(),
             0.0,
-        )),
-        Arrow::Deflected => Some((
-            shapes.straight_arrow.clone(),
-            shapes.arrow_material.clone(),
-            FRAC_PI_4,
         )),
         Arrow::Curved => Some((
             shapes.curved_arrow.clone(),

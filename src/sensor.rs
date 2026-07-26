@@ -62,7 +62,14 @@ impl Engaged for Sensor {
         true
     }
 
-    fn reaches(&self, at: Vec3, facing: Heading, carrier: &Carrier, carrier_at: Vec3) -> bool {
+    fn reaches(
+        &self,
+        _switch: Switch,
+        at: Vec3,
+        facing: Heading,
+        carrier: &Carrier,
+        carrier_at: Vec3,
+    ) -> bool {
         self.watches(carrier.kind) && in_beam(at, facing, carrier_at)
     }
 }

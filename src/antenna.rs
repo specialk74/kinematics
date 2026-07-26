@@ -49,7 +49,14 @@ impl Engaged for Antenna {
         true
     }
 
-    fn reaches(&self, at: Vec3, facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
+    fn reaches(
+        &self,
+        _switch: Switch,
+        at: Vec3,
+        facing: Heading,
+        _carrier: &Carrier,
+        carrier_at: Vec3,
+    ) -> bool {
         // L'antenna legge chiunque le stia sopra: il tubo non la riguarda.
         over(eye(at, facing), carrier_at)
     }

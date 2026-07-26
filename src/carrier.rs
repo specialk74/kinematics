@@ -503,11 +503,10 @@ fn carrier_step(
         }
     }
 
-    // 4. La deviazione di corsia riguarda solo i carrier con tubo.
-    if carrier.kind != CarrierType::WithTube {
-        return (straight, carrier.motion);
-    }
-
+    // 4. La deviazione di corsia, che vale per chiunque: vuoti e pieni. Chi
+    //    debba essere deviato e chi no lo decidera' la logica di impianto
+    //    quando ci sara' mqtt; qui c'e' solo il movimento, e il movimento non
+    //    guarda dentro al carrier.
     for (divert, switch, facing, position) in track.diverts {
         if !divert.catches(*switch, *position, translation, *facing, heading) {
             continue;
@@ -1379,16 +1378,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_carriers_are_never_diverted() {
-        let carrier = carrier(CarrierType::Empty);
-        let position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
-        let (step, _) = carrier_step(
-            &carrier,
-            position,
-            &only_diverts(&[(&atr(), ON, Heading::Left, position)]),
-            DELTA,
-        );
+    fn every_carrier_is_diverted_whatever_it_carries() {
+        for kind in [CarrierType::Empty, CarrierType::WithTube] {
+            let carrier = carrier(kind);
+            let position = Vec3::new(0.0, MAIN_LANE + LANE_HEIGHT, 0.0);
+            let (step, _) = carrier_step(
+                &carrier,
+                position,
+                &only_diverts(&[(&atr(), ON, Heading::Left, position)]),
+                DELTA,
+            );
 
-        assert_eq!(step.y, 0.0);
+            assert!(
+                step.y < 0.0,
+                "il movimento non guarda dentro al carrier: {kind:?} deve scendere"
+            );
+        }
     }
 }

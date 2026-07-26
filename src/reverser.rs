@@ -52,10 +52,16 @@ impl Engaged for Reverser {
         self.engaged = engaged;
     }
 
-    fn reaches(&self, at: Vec3, _facing: Heading, _carrier: &Carrier, carrier_at: Vec3) -> bool {
-        // Per ora: "ho un carrier nella mia cella". La condizione vera, quella
-        // che dira' a mqtt "sto agendo su questo carrier", e' diversa per
-        // ciascuno e verra' quando serviranno i messaggi e non il colore.
+    fn reaches(
+        &self,
+        _switch: Switch,
+        at: Vec3,
+        _facing: Heading,
+        _carrier: &Carrier,
+        carrier_at: Vec3,
+    ) -> bool {
+        // L'azione dura un frame solo - l'istante in cui la marcia cambia -
+        // quindi qui "ce l'ho fra le mani" resta la risposta giusta.
         in_the_same_cell(at, carrier_at)
     }
 }
