@@ -93,19 +93,19 @@ impl Plugin for SensorVisualsPlugin {
 pub struct SensorAssets {
     tube_material: Handle<ColorMaterial>,
     carrier_material: Handle<ColorMaterial>,
+    /// Gli stessi due colori schiariti: mentre il sensore lavora la sua sbarra
+    /// si accende, e resta riconoscibile qual e' dei due.
+    tube_reading_material: Handle<ColorMaterial>,
+    carrier_reading_material: Handle<ColorMaterial>,
     idle_material: Handle<ColorMaterial>,
 }
-
-/// Il bordo che si accende. Sta su un figlio e non sulla sbarra stessa perche'
-/// il colore della sbarra dice che sensore e', e quello non deve cambiare
-/// mentre lavora.
-#[derive(Component)]
-struct SensorGlow;
 
 fn setup_sensor_assets(mut commands: Commands, mut materials: ResMut<Assets<ColorMaterial>>) {
     commands.insert_resource(SensorAssets {
         tube_material: materials.add(Color::srgb(0.95, 0.80, 0.20)),
         carrier_material: materials.add(Color::srgb(0.10, 0.75, 0.80)),
+        tube_reading_material: materials.add(Color::srgb(1.0, 0.97, 0.62)),
+        carrier_reading_material: materials.add(Color::srgb(0.48, 0.97, 1.0)),
         idle_material: materials.add(Color::srgb(0.3, 0.3, 0.3)),
     });
 }
@@ -128,9 +128,11 @@ fn material_for(assets: &SensorAssets, sensor: &Sensor) -> Handle<ColorMaterial>
         return assets.idle_material.clone();
     }
 
-    match sensor.kind {
-        SensorKind::Tube => assets.tube_material.clone(),
-        SensorKind::Carrier => assets.carrier_material.clone(),
+    match (sensor.kind, sensor.seeing) {
+        (SensorKind::Tube, false) => assets.tube_material.clone(),
+        (SensorKind::Tube, true) => assets.tube_reading_material.clone(),
+        (SensorKind::Carrier, false) => assets.carrier_material.clone(),
+        (SensorKind::Carrier, true) => assets.carrier_reading_material.clone(),
     }
 }
 
@@ -149,37 +151,17 @@ fn attach_sensor_visuals(
             material_for(&assets, sensor),
             Arrow::None,
         );
-
-        commands.entity(entity).with_child((
-            Mesh2d(piece::glow(&shapes)),
-            MeshMaterial2d(piece::glow_material(&shapes)),
-            // Dietro alla sbarra, cosi' sporge tutt'attorno come un bordo.
-            Transform::from_xyz(0.0, 0.0, -0.01),
-            Visibility::Hidden,
-            SensorGlow,
-        ));
     }
 }
 
-/// Il colore segue lo stato e il bordo segue quello che il sensore vede: chi
-/// accende, spegne o passa davanti non deve sapere niente di mesh.
+/// Il colore segue lo stato e quello che il sensore vede: chi accende, spegne
+/// o passa davanti non deve sapere niente di mesh.
 fn refresh_sensor_look(
     assets: Res<SensorAssets>,
-    sensors: Query<(&Sensor, &Children, &mut MeshMaterial2d<ColorMaterial>), Changed<Sensor>>,
-    mut glows: Query<&mut Visibility, With<SensorGlow>>,
+    sensors: Query<(&Sensor, &mut MeshMaterial2d<ColorMaterial>), Changed<Sensor>>,
 ) {
-    for (sensor, children, mut material) in sensors {
+    for (sensor, mut material) in sensors {
         material.0 = material_for(&assets, sensor);
-
-        for child in children.iter() {
-            if let Ok(mut visibility) = glows.get_mut(child) {
-                *visibility = if sensor.seeing {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                };
-            }
-        }
     }
 }
 

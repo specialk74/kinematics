@@ -31,9 +31,6 @@ pub const BAR_OFFSET: f32 = (GRID_STEP - BAR_THICKNESS) / 2.0;
 /// del carrier, l'antenna resta sotto di lui senza doverla ritoccare.
 pub const ANTENNA_OFFSET: f32 = BAR_OFFSET - BAR_THICKNESS / 2.0 - CARRIER_RADIUS;
 
-/// Quanto sporge il bordo acceso dei sensori, per lato.
-const GLOW_BORDER: f32 = 3.0;
-const GLOW_COLOR: Color = Color::srgb(0.20, 0.95, 0.30);
 /// Lunghezza complessiva della freccia, stelo compreso.
 const ARROW_LENGTH: f32 = 20.0;
 const ARROW_HEAD: f32 = 8.0;
@@ -88,8 +85,6 @@ pub struct PieceShapes {
     square: Handle<Mesh>,
     circle: Handle<Mesh>,
     bar: Handle<Mesh>,
-    glow: Handle<Mesh>,
-    glow_material: Handle<ColorMaterial>,
     straight_arrow: Handle<Mesh>,
     curved_arrow: Handle<Mesh>,
     stop: Handle<Mesh>,
@@ -194,16 +189,6 @@ fn setup_piece_shapes(
             Mesh::from(Rectangle::new(BAR_LENGTH, BAR_THICKNESS))
                 .translated_by(Vec3::Y * BAR_OFFSET),
         ),
-        // Una sbarra un po' piu' grande, da mettere dietro all'altra: quello
-        // che sporge e' il bordo che si accende quando il sensore lavora.
-        glow: meshes.add(
-            Mesh::from(Rectangle::new(
-                BAR_LENGTH + 2.0 * GLOW_BORDER,
-                BAR_THICKNESS + 2.0 * GLOW_BORDER,
-            ))
-            .translated_by(Vec3::Y * BAR_OFFSET),
-        ),
-        glow_material: materials.add(GLOW_COLOR),
         straight_arrow: meshes.add(straight_arrow()),
         curved_arrow: meshes.add(curved_arrow()),
         stop: meshes.add(Rectangle::new(STOP_SIZE, STOP_SIZE)),
@@ -227,15 +212,6 @@ pub fn circle(shapes: &PieceShapes) -> Handle<Mesh> {
 /// Mesh della sbarra del gate e dei sensori.
 pub fn bar(shapes: &PieceShapes) -> Handle<Mesh> {
     shapes.bar.clone()
-}
-
-/// Mesh e colore del bordo acceso dei sensori.
-pub fn glow(shapes: &PieceShapes) -> Handle<Mesh> {
-    shapes.glow.clone()
-}
-
-pub fn glow_material(shapes: &PieceShapes) -> Handle<ColorMaterial> {
-    shapes.glow_material.clone()
 }
 
 /// La figura che un oggetto occupa davvero dentro la sua cella. Serve a sapere

@@ -142,18 +142,6 @@ where
     )
 }
 
-/// L'oggetto in cima alla cella: quello di linea se c'e', altrimenti l'antenna
-/// sotto. E' quello che l'utente vede e quindi quello che crede di puntare.
-fn topmost<'a>(
-    cell: IVec2,
-    objects: impl Iterator<Item = (Entity, &'a Placed)>,
-) -> Option<(Entity, Tool)> {
-    objects
-        .filter(|(_, placed)| placed.cell == cell)
-        .max_by_key(|(_, placed)| placed.tool.layer() == Layer::Track)
-        .map(|(entity, placed)| (entity, placed.tool))
-}
-
 /// Cosa fa il prossimo clic nella scena. `Pan` non e' un oggetto piazzabile, per
 /// questo sta qui e non in `Tool`: quell'enum e' il vocabolario del file di
 /// layout, e nel file non puo' finire qualcosa che non e' un oggetto.
@@ -961,16 +949,22 @@ mod tests {
                 Some(Tool::Antenna),
                 "un'antenna vede solo l'antenna"
             );
+            let triples = || {
+                objects
+                    .iter()
+                    .map(|(entity, placed, facing)| (*entity, placed, facing))
+            };
+            let on_the_bar = grid::cell_center(cell) + Vec2::new(-BAR_OFFSET, 0.0);
             assert_eq!(
-                topmost(cell, entries()).map(|(_, tool)| tool),
+                clicked_piece(on_the_bar, cell, triples).map(|(_, tool)| tool),
                 Some(Tool::Gate),
-                "il clic prende quello che si vede"
+                "il clic sulla sbarra prende quello che si vede"
             );
         }
     }
 
-    /// Su una cella con la sola antenna non c'e' niente da cui difenderla: e'
-    /// lei quella in cima, e il clic la prende.
+    /// Su una cella con la sola antenna non c'e' niente da cui difenderla: il
+    /// clic la prende ovunque cada nella cella.
     #[test]
     fn an_antenna_alone_is_the_one_you_click() {
         let cell = IVec2::ZERO;
@@ -980,14 +974,26 @@ mod tests {
                 tool: Tool::Antenna,
                 cell,
             },
+            Facing::default(),
         )];
-        let entries = || objects.iter().map(|(entity, placed)| (*entity, placed));
+        let triples = || {
+            objects
+                .iter()
+                .map(|(entity, placed, facing)| (*entity, placed, facing))
+        };
 
         assert_eq!(
-            topmost(cell, entries()).map(|(_, tool)| tool),
+            clicked_piece(grid::cell_center(cell), cell, triples).map(|(_, tool)| tool),
             Some(Tool::Antenna)
         );
-        assert!(occupant_on(cell, Layer::Track, entries()).is_none());
+        assert!(
+            occupant_on(
+                cell,
+                Layer::Track,
+                objects.iter().map(|(entity, placed, _)| (*entity, placed))
+            )
+            .is_none()
+        );
     }
 
     /// Il punto della modifica alla sbarra: nella cella di un gate il centro
