@@ -11,6 +11,7 @@ use crate::antenna::Antenna;
 use crate::divert::{Divert, DivertKind};
 use crate::editor::Tool;
 use crate::gate::Gate;
+use crate::name::{Identity, PieceId, PieceName};
 use crate::piece::Facing;
 use crate::reverser::Reverser;
 use crate::sensor::Sensor;
@@ -60,14 +61,22 @@ impl LayoutFile {
 /// indici di cella, cosi' il file resta valido anche se cambia il passo della
 /// griglia. Lo stato acceso/spento non fa parte del layout: il file descrive
 /// l'impianto, non la sua configurazione del momento.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LayoutObject {
+    /// Chi e' questo oggetto per il programma. Assente nei file salvati prima
+    /// degli id: quelli lo ricevono all'apertura.
+    #[serde(default)]
+    pub id: u32,
     pub tool: Tool,
     pub cell: (i32, i32),
     /// Dove manda il carrier. Assente nei file salvati prima che gli oggetti
     /// avessero un orientamento: quelli si riaprono con il verso di partenza.
     #[serde(default)]
     pub facing: Facing,
+    /// Con che nome l'oggetto si presenta fuori di qui, mqtt compreso. Assente
+    /// nei file salvati prima dei nomi: quelli lo ricevono all'apertura.
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
@@ -155,7 +164,13 @@ impl Plugin for LayoutPlugin {
 
 /// Unico punto in cui nasce un oggetto della scena: lo usano il clic
 /// dell'editor, il bottone Carica e l'avvio da riga di comando.
-pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: Facing) {
+pub fn place_in_cell(
+    commands: &mut Commands,
+    tool: Tool,
+    cell: IVec2,
+    facing: Facing,
+    who: Identity,
+) {
     // La quota la decide il piano dell'oggetto: quelli di linea stanno sopra ai
     // carrier, l'antenna sotto.
     let position = crate::grid::cell_center(cell).extend(tool.layer().z());
@@ -176,33 +191,85 @@ pub fn place_in_cell(commands: &mut Commands, tool: Tool, cell: IVec2, facing: F
         }
     };
 
-    commands
-        .entity(object)
-        .insert((Placed { tool, cell }, facing));
+    commands.entity(object).insert((
+        Placed { tool, cell },
+        facing,
+        PieceId(who.id),
+        PieceName(who.name),
+    ));
 }
 
 /// Raccoglie in un `Layout` gli oggetti attualmente in scena. Lo usano il
 /// bottone Salva e la registrazione, che porta con se' l'impianto.
-pub fn collect(placed: &Query<(&Placed, &Facing)>) -> Layout {
+pub fn collect(placed: &Query<(&Placed, &Facing, &PieceId, &PieceName)>) -> Layout {
     Layout {
         objects: placed
             .iter()
-            .map(|(placed, facing)| LayoutObject {
+            .map(|(placed, facing, id, name)| LayoutObject {
+                id: id.0,
                 tool: placed.tool,
                 cell: (placed.cell.x, placed.cell.y),
                 facing: *facing,
+                name: name.0.clone(),
             })
             .collect(),
     }
 }
 
+/// Chi e' ogni oggetto del layout, nell'ordine in cui stanno nel file. Chi non
+/// ha id o nome li riceve qui: sono i file salvati prima che esistessero, e un
+/// oggetto senza identita' non potrebbe ne' parlare su mqtt ne' comparire in una
+/// registrazione. Quelli assegnati d'ufficio non si pestano con quelli che il
+/// file porta gia'.
+pub fn fill_identities(layout: &Layout) -> Vec<Identity> {
+    let mut names: Vec<String> = layout
+        .objects
+        .iter()
+        .map(|object| object.name.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut ids: Vec<u32> = layout
+        .objects
+        .iter()
+        .map(|object| object.id)
+        .filter(|id| *id != 0)
+        .collect();
+
+    layout
+        .objects
+        .iter()
+        .map(|object| {
+            let name = if object.name.is_empty() {
+                let fresh = crate::name::next_free(object.tool, &names);
+                names.push(fresh.clone());
+                fresh
+            } else {
+                object.name.clone()
+            };
+
+            // Lo zero non e' un id: e' il posto vuoto lasciato da un file
+            // scritto prima che gli id esistessero.
+            let id = if object.id == 0 {
+                let fresh = crate::name::next_free_id(&ids);
+                ids.push(fresh);
+                fresh
+            } else {
+                object.id
+            };
+
+            Identity { id, name }
+        })
+        .collect()
+}
+
 pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
-    for object in &layout.objects {
+    for (object, who) in layout.objects.iter().zip(fill_identities(layout)) {
         place_in_cell(
             commands,
             object.tool,
             IVec2::new(object.cell.0, object.cell.1),
             object.facing,
+            who,
         );
     }
 
@@ -250,21 +317,29 @@ mod tests {
         Layout {
             objects: vec![
                 LayoutObject {
+                    id: 1,
+                    name: "sorgente-1".to_string(),
                     tool: Tool::CarrierSource,
                     cell: (6, 0),
                     facing: Facing::default(),
                 },
                 LayoutObject {
+                    id: 2,
+                    name: "divert-1".to_string(),
                     tool: Tool::Divert,
                     cell: (2, 0),
                     facing: Facing(crate::carrier::Heading::Up),
                 },
                 LayoutObject {
+                    id: 3,
+                    name: "atr-1".to_string(),
                     tool: Tool::Atr,
                     cell: (-1, 1),
                     facing: Facing::default(),
                 },
                 LayoutObject {
+                    id: 4,
+                    name: "gate-1".to_string(),
                     tool: Tool::Gate,
                     cell: (-3, 0),
                     facing: Facing::default(),
@@ -288,6 +363,55 @@ mod tests {
 
         assert!(saved.contains("CarrierSource"), "{saved}");
         assert!(saved.contains("(6, 0)"), "{saved}");
+    }
+
+    /// Il nome fa parte dell'oggetto salvato: senza, all'apertura si
+    /// perderebbe proprio quello con cui l'impianto parla al mondo di fuori.
+    #[test]
+    fn the_names_travel_with_the_layout() {
+        let saved = to_ron(&sample()).expect("serializzazione");
+
+        assert!(saved.contains("gate-1"), "{saved}");
+        assert_eq!(
+            from_ron(&saved).expect("rilettura").objects[3].name,
+            "gate-1"
+        );
+    }
+
+    /// I file salvati prima dei nomi si aprono lo stesso: chi non ce l'ha lo
+    /// riceve al caricamento, e nessuno resta senza.
+    #[test]
+    fn an_old_file_without_names_still_loads() {
+        let old = "(objects: [(tool: Gate, cell: (1, 2)), (tool: Gate, cell: (3, 2))])";
+
+        let layout = from_ron(old).expect("rilettura");
+        assert!(layout.objects[0].name.is_empty());
+
+        let given = fill_identities(&layout);
+        let names: Vec<&str> = given.iter().map(|who| who.name.as_str()).collect();
+        let ids: Vec<u32> = given.iter().map(|who| who.id).collect();
+
+        assert_eq!(names, vec!["gate-1", "gate-2"], "battezzati all'apertura");
+        assert_eq!(ids, vec![1, 2], "e numerati");
+    }
+
+    /// Un file a meta' strada - qualche nome scritto a mano, altri no - non deve
+    /// generare doppioni: i nomi dati d'ufficio saltano quelli gia' usati.
+    #[test]
+    fn the_names_given_at_load_time_avoid_the_ones_already_there() {
+        let mixed = "(objects: [\
+            (tool: Gate, cell: (1, 2), name: \"gate-1\"), \
+            (tool: Gate, cell: (3, 2)), \
+            (tool: Gate, cell: (5, 2), name: \"gate-2\")])";
+
+        let layout = from_ron(mixed).expect("rilettura");
+
+        let names: Vec<String> = fill_identities(&layout)
+            .into_iter()
+            .map(|who| who.name)
+            .collect();
+
+        assert_eq!(names, vec!["gate-1", "gate-3", "gate-2"]);
     }
 
     /// I file salvati prima dell'orientamento devono continuare ad aprirsi.

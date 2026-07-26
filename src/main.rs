@@ -18,6 +18,8 @@ mod gate;
 mod geometry;
 mod grid;
 mod layout;
+mod name;
+mod name_panel;
 mod piece;
 mod reverser;
 mod sensor;
@@ -37,6 +39,8 @@ use engagement::EngagementPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use layout::LayoutPlugin;
+use name::NamePlugin;
+use name_panel::NamePanelPlugin;
 use piece::PiecePlugin;
 use reverser::ReverserVisualsPlugin;
 use sensor::SensorVisualsPlugin;
@@ -95,7 +99,9 @@ fn main() {
             ReverserVisualsPlugin,
             AntennaVisualsPlugin,
             SensorVisualsPlugin,
-        ));
+        ))
+        // In due gruppi perche' un gruppo solo ha un tetto di quindici.
+        .add_plugins((NamePlugin, NamePanelPlugin));
     }
 
     // Registrazione e riproduzione partono a scena gia' costruita: il layout

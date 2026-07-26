@@ -9,8 +9,9 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
-use crate::editor::{BUTTON_IDLE, Layer, PALETTE_WIDTH, button_label, top_button};
+use crate::editor::{BUTTON_IDLE, PALETTE_WIDTH, button_label, top_button};
 use crate::layout::{Layout, Placed, Switches, spawn_layout};
+use crate::name::{PieceId, PieceName};
 use crate::piece::Facing;
 use crate::simulation::SimulationState;
 
@@ -37,12 +38,23 @@ impl ReplayNotice {
     }
 }
 
-/// Dove si trovava un carrier in un certo istante.
+/// Dove si trovava un carrier in un certo istante: id, x, y. E' una tupla e non
+/// una struttura con i campi scritti perche' di righe come questa un file ne
+/// contiene decine di migliaia, ed erano quattro ciascuna.
+///
+/// Che tipo di carrier sia non c'e' scritto: il tipo e' uno stato che cambia di
+/// rado, quindi si registra come gli interruttori, solo quando cambia.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
-pub struct TracedCarrier {
-    pub id: u32,
-    pub kind: CarrierType,
-    pub at: (f32, f32),
+pub struct TracedCarrier(pub u32, pub f32, pub f32);
+
+impl TracedCarrier {
+    pub fn id(self) -> u32 {
+        self.0
+    }
+
+    pub fn at(self) -> Vec3 {
+        Vec3::new(self.1, self.2, 0.0)
+    }
 }
 
 /// Un istante della simulazione: chi c'era, dove, e quali interruttori sono
@@ -59,23 +71,18 @@ pub struct TracedCarrier {
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct TraceFrame {
     pub carriers: Vec<TracedCarrier>,
-    /// Gli oggetti di linea che sono cambiati, per cella. Negli istanti in cui
-    /// non cambia niente il campo non viene proprio scritto: erano tre righe
-    /// vuote per istante, e un file lungo e' fatto di istanti in cui non cambia
-    /// niente.
+    /// Gli interruttori cambiati, ciascuno con l'id dell'oggetto a cui
+    /// appartiene. L'id e' l'unica chiave che regge: la cella si sposta
+    /// trascinando l'oggetto, e per giunta una cella puo' ospitarne tre
+    /// sovrapposti. Negli istanti in cui non cambia niente il campo non viene
+    /// scritto affatto.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub switches: Vec<((i32, i32), bool)>,
-    /// I sensori sulle pareti, sempre per cella. Assente nelle registrazioni
-    /// fatte prima che esistessero.
+    pub switches: Vec<(u32, bool)>,
+    /// I carrier che hanno cambiato tipo, piu' quelli che compaiono adesso per
+    /// la prima volta: anche entrare in scena e' un cambio, visto che prima non
+    /// c'erano. Un carrier che resta com'e' non compare qui.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub side: Vec<((i32, i32), bool)>,
-    /// Quelli del piano di sotto, sempre per cella. Stanno in un elenco a parte
-    /// perche' un'antenna puo' condividere la cella con un oggetto di linea: in
-    /// un elenco solo le due voci avrebbero la stessa chiave e in riproduzione
-    /// non si saprebbe piu' quale stato appartiene a quale oggetto. Assente
-    /// nelle registrazioni fatte prima delle antenne, che restano leggibili.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub under: Vec<((i32, i32), bool)>,
+    pub kinds: Vec<(u32, CarrierType)>,
 }
 
 /// Una registrazione completa. Contiene anche il layout, cosi' il file e' lo
@@ -125,38 +132,22 @@ pub struct Recording {
     active: bool,
     countdown: f32,
     frames: Vec<TraceFrame>,
+    /// Di che tipo era ogni carrier nell'istante scritto prima: il termine di
+    /// paragone per scrivere solo i cambi, come per gli interruttori.
+    last_kinds: Vec<(u32, CarrierType)>,
     /// Come erano messi gli interruttori nell'istante scritto prima: e' il
     /// termine di paragone che permette di scrivere solo i cambi.
-    last: Switchboard,
-}
-
-/// Lo stato di tutti gli interruttori in un istante, un elenco per piano.
-#[derive(Default, Clone, PartialEq, Debug)]
-struct Switchboard {
-    track: Vec<((i32, i32), bool)>,
-    side: Vec<((i32, i32), bool)>,
-    under: Vec<((i32, i32), bool)>,
-}
-
-impl Switchboard {
-    /// I cambi di un solo istante, presi cosi' come stanno nel file.
-    fn of(frame: &TraceFrame) -> Self {
-        Switchboard {
-            track: frame.switches.clone(),
-            side: frame.side.clone(),
-            under: frame.under.clone(),
-        }
-    }
+    last: Vec<(u32, bool)>,
 }
 
 /// Gli interruttori che sono cambiati rispetto all'istante precedente. Chi non
 /// c'era prima conta come cambiato: e' cosi' che il primo istante li porta tutti.
-fn changes(now: &[((i32, i32), bool)], before: &[((i32, i32), bool)]) -> Vec<((i32, i32), bool)> {
+fn changes<T: Copy + PartialEq>(now: &[(u32, T)], before: &[(u32, T)]) -> Vec<(u32, T)> {
     now.iter()
-        .filter(|(cell, active)| {
+        .filter(|(id, value)| {
             !before
                 .iter()
-                .any(|(was_cell, was_active)| was_cell == cell && was_active == active)
+                .any(|(was_id, was_value)| was_id == id && was_value == value)
         })
         .copied()
         .collect()
@@ -164,28 +155,31 @@ fn changes(now: &[((i32, i32), bool)], before: &[((i32, i32), bool)]) -> Vec<((i
 
 /// Applica dei cambi a uno stato: quello che c'era viene aggiornato, quello che
 /// non c'era si aggiunge.
-fn apply(state: &mut Vec<((i32, i32), bool)>, changes: &[((i32, i32), bool)]) {
-    for (cell, active) in changes {
-        match state.iter_mut().find(|(known, _)| known == cell) {
-            Some((_, known)) => *known = *active,
-            None => state.push((*cell, *active)),
+fn apply<T: Copy + PartialEq>(state: &mut Vec<(u32, T)>, changes: &[(u32, T)]) {
+    for (id, value) in changes {
+        match state.iter_mut().find(|(known, _)| known == id) {
+            Some((_, known)) => *known = *value,
+            None => state.push((*id, *value)),
         }
     }
 }
 
-/// Somma i cambi dall'inizio fino a quell'istante compreso: e' come erano messi
-/// gli interruttori li'. Serve dopo un salto con la barra, quando gli istanti
-/// intermedi non sono passati per la scena.
-fn switchboard_up_to(trace: &Trace, index: usize) -> Switchboard {
-    let mut board = Switchboard::default();
+/// Somma i cambi dall'inizio fino a quell'istante compreso: e' come stavano le
+/// cose li'. Serve dopo un salto con la barra, quando gli istanti intermedi non
+/// sono passati per la scena. Vale per gli interruttori e per i tipi dei
+/// carrier, che si registrano allo stesso modo.
+fn folded<T: Copy + PartialEq>(
+    trace: &Trace,
+    index: usize,
+    of: impl Fn(&TraceFrame) -> &[(u32, T)],
+) -> Vec<(u32, T)> {
+    let mut state = Vec::new();
 
     for frame in trace.frames.iter().take(index + 1) {
-        apply(&mut board.track, &frame.switches);
-        apply(&mut board.side, &frame.side);
-        apply(&mut board.under, &frame.under);
+        apply(&mut state, of(frame));
     }
 
-    board
+    state
 }
 
 #[derive(Resource, Default)]
@@ -448,7 +442,7 @@ fn pressed<Button: Component>(
 fn toggle_recording(
     buttons: Query<&Interaction, (Changed<Interaction>, With<RecordButton>)>,
     mut recording: ResMut<Recording>,
-    placed: Query<(&Placed, &Facing)>,
+    placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
 ) {
     if !pressed(&buttons) {
         return;
@@ -469,12 +463,16 @@ fn begin(recording: &mut Recording) {
     recording.active = true;
     recording.countdown = 0.0;
     recording.frames.clear();
-    recording.last = Switchboard::default();
+    recording.last = Vec::new();
+    recording.last_kinds = Vec::new();
     info!("registrazione avviata");
 }
 
 /// Chiude la registrazione e la scrive su file, layout compreso.
-fn stop_recording(recording: &mut Recording, placed: &Query<(&Placed, &Facing)>) {
+fn stop_recording(
+    recording: &mut Recording,
+    placed: &Query<(&Placed, &Facing, &PieceId, &PieceName)>,
+) {
     recording.active = false;
 
     if recording.frames.is_empty() {
@@ -495,20 +493,11 @@ fn stop_recording(recording: &mut Recording, placed: &Query<(&Placed, &Facing)>)
     }
 }
 
-/// Lo stato degli interruttori di un piano solo.
-fn switches_on(
-    layer: Layer,
-    placed: &Query<(Entity, &Placed)>,
-    switches: &Switches,
-) -> Vec<((i32, i32), bool)> {
+/// Lo stato di tutti gli interruttori in scena, ciascuno con il suo id.
+fn switch_states(placed: &Query<(Entity, &PieceId)>, switches: &Switches) -> Vec<(u32, bool)> {
     placed
         .iter()
-        .filter(|(_, placed)| placed.tool.layer() == layer)
-        .filter_map(|(entity, placed)| {
-            switches
-                .get(entity)
-                .map(|active| ((placed.cell.x, placed.cell.y), active))
-        })
+        .filter_map(|(entity, id)| switches.get(entity).map(|active| (id.0, active)))
         .collect()
 }
 
@@ -516,7 +505,7 @@ fn record_frames(
     time: Res<Time>,
     mut recording: ResMut<Recording>,
     carriers: Query<(&Carrier, &Transform)>,
-    placed: Query<(Entity, &Placed)>,
+    placed: Query<(Entity, &PieceId)>,
     switches: Switches,
 ) {
     if !recording.active {
@@ -529,26 +518,28 @@ fn record_frames(
     }
     recording.countdown += 1.0 / TRACE_FPS;
 
-    let now = Switchboard {
-        track: switches_on(Layer::Track, &placed, &switches),
-        side: switches_on(Layer::Side, &placed, &switches),
-        under: switches_on(Layer::Under, &placed, &switches),
-    };
+    let now = switch_states(&placed, &switches);
+    let kinds_now: Vec<(u32, CarrierType)> = carriers
+        .iter()
+        .map(|(carrier, _)| (carrier.carrier_id, carrier.kind))
+        .collect();
 
     let frame = TraceFrame {
         carriers: carriers
             .iter()
-            .map(|(carrier, transform)| TracedCarrier {
-                id: carrier.carrier_id,
-                kind: carrier.kind,
-                at: (transform.translation.x, transform.translation.y),
+            .map(|(carrier, transform)| {
+                TracedCarrier(
+                    carrier.carrier_id,
+                    transform.translation.x,
+                    transform.translation.y,
+                )
             })
             .collect(),
-        switches: changes(&now.track, &recording.last.track),
-        side: changes(&now.side, &recording.last.side),
-        under: changes(&now.under, &recording.last.under),
+        switches: changes(&now, &recording.last),
+        kinds: changes(&kinds_now, &recording.last_kinds),
     };
 
+    recording.last_kinds = kinds_now;
     recording.last = now;
     recording.frames.push(frame);
 }
@@ -556,7 +547,7 @@ fn record_frames(
 fn save_on_exit(
     mut exits: MessageReader<AppExit>,
     mut recording: ResMut<Recording>,
-    placed: Query<(&Placed, &Facing)>,
+    placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
 ) {
     if exits.read().next().is_some() && recording.active {
         stop_recording(&mut recording, &placed);
@@ -706,9 +697,9 @@ fn play_frames(
     time: Res<Time>,
     mut replay: ResMut<Replay>,
     mut next_state: ResMut<NextState<SimulationState>>,
-    carriers: Query<(Entity, &Carrier)>,
+    mut carriers: Query<(Entity, &mut Carrier)>,
     mut positions: Query<&mut Transform>,
-    placed: Query<(Entity, &Placed)>,
+    placed: Query<(Entity, &PieceId)>,
     mut switches: Switches,
 ) {
     let Some(fps) = replay.trace.as_ref().map(|trace| trace.fps) else {
@@ -754,22 +745,51 @@ fn play_frames(
     let previous = replay.applied;
     replay.applied = Some(wanted);
 
+    // Nel file ci sono solo i cambi, quindi scorrendo bastano quelli
+    // dell'istante; dopo un salto con la barra invece gli istanti intermedi non
+    // sono passati di qui, e va rifatta la somma dall'inizio. Vale per gli
+    // interruttori e per i tipi dei carrier allo stesso modo.
+    let scrolled = previous.map(|last| last + 1) == Some(wanted);
+    let (board, kinds) = match (scrolled, replay.trace.as_ref()) {
+        (false, Some(trace)) => (
+            folded(trace, wanted, |frame| &frame.switches),
+            folded(trace, wanted, |frame| &frame.kinds),
+        ),
+        _ => (frame.switches.clone(), frame.kinds.clone()),
+    };
+    let kind_of = |id: u32| {
+        kinds
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map(|(_, kind)| *kind)
+    };
+
     let mut live: HashMap<u32, Entity> = carriers
         .iter()
         .map(|(entity, carrier)| (carrier.carrier_id, entity))
         .collect();
 
     for traced in &frame.carriers {
-        let at = Vec3::new(traced.at.0, traced.at.1, 0.0);
+        let at = traced.at();
 
-        match live.remove(&traced.id) {
+        match live.remove(&traced.id()) {
             Some(entity) => {
                 if let Ok(mut transform) = positions.get_mut(entity) {
                     transform.translation = at;
                 }
+                // Un carrier che nel frattempo si e' svuotato o riempito: il
+                // cambio sta nel file, e qui va rimesso in scena.
+                if let Some(kind) = kind_of(traced.id())
+                    && let Ok((_, mut carrier)) = carriers.get_mut(entity)
+                    && carrier.kind != kind
+                {
+                    carrier.kind = kind;
+                }
             }
             None => {
-                spawn_carrier(&mut commands, at, traced.kind, traced.id, Heading::Left);
+                let kind = kind_of(traced.id()).unwrap_or(CarrierType::Empty);
+
+                spawn_carrier(&mut commands, at, kind, traced.id(), Heading::Left);
             }
         }
     }
@@ -781,36 +801,13 @@ fn play_frames(
 
     // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
     // deve richiudersi anche qui, altrimenti la scena non spiega piu' la coda
-    // che si vede. I piani si ripristinano separatamente: e' l'unico modo di non
-    // confondere un'antenna con l'oggetto che le sta sopra.
-    //
-    // Nel file ci sono solo i cambi, quindi scorrendo basta applicare quelli
-    // dell'istante; dopo un salto con la barra invece i cambi intermedi non sono
-    // passati di qui, e va rifatta la somma dall'inizio.
-    let scrolled = previous.map(|last| last + 1) == Some(wanted);
-    let board = match (scrolled, replay.trace.as_ref()) {
-        (false, Some(trace)) => switchboard_up_to(trace, wanted),
-        _ => Switchboard::of(&frame),
-    };
-
-    restore(Layer::Track, &board.track, &placed, &mut switches);
-    restore(Layer::Side, &board.side, &placed, &mut switches);
-    restore(Layer::Under, &board.under, &placed, &mut switches);
+    // che si vede.
+    restore(&board, &placed, &mut switches);
 }
 
-fn restore(
-    layer: Layer,
-    states: &[((i32, i32), bool)],
-    placed: &Query<(Entity, &Placed)>,
-    switches: &mut Switches,
-) {
-    for ((x, y), active) in states {
-        let cell = IVec2::new(*x, *y);
-        let found = placed
-            .iter()
-            .find(|(_, placed)| placed.cell == cell && placed.tool.layer() == layer);
-
-        if let Some((entity, _)) = found {
+fn restore(states: &[(u32, bool)], placed: &Query<(Entity, &PieceId)>, switches: &mut Switches) {
+    for (id, active) in states {
+        if let Some((entity, _)) = placed.iter().find(|(_, known)| known.0 == *id) {
             switches.set(entity, *active);
         }
     }
@@ -902,28 +899,19 @@ mod tests {
             layout: Layout::default(),
             frames: vec![
                 TraceFrame {
-                    carriers: vec![TracedCarrier {
-                        id: 1,
-                        kind: CarrierType::WithTube,
-                        at: (10.0, -20.0),
-                    }],
-                    switches: vec![((3, 0), true)],
-                    side: vec![((3, 0), true)],
-                    // Un'antenna accesa sotto quello stesso gate.
-                    under: vec![((3, 0), true)],
+                    carriers: vec![TracedCarrier(1, 10.0, -20.0)],
+                    // Il gate (1) e l'antenna che gli sta sotto (2), accesi.
+                    switches: vec![(1, true), (2, true)],
+                    // Il carrier 1 entra in scena adesso, con la provetta.
+                    kinds: vec![(1, CarrierType::WithTube)],
                 },
                 TraceFrame {
-                    carriers: vec![TracedCarrier {
-                        id: 1,
-                        kind: CarrierType::WithTube,
-                        at: (5.0, -20.0),
-                    }],
+                    carriers: vec![TracedCarrier(1, 5.0, -20.0)],
                     // Nel secondo istante e' cambiato solo il gate: l'antenna
-                    // sotto e il sensore accanto sono rimasti come stavano, e
-                    // infatti non compaiono.
-                    switches: vec![((3, 0), false)],
-                    side: vec![],
-                    under: vec![],
+                    // e' rimasta com'era, e infatti non compare.
+                    switches: vec![(1, false)],
+                    // Il carrier ha perso la provetta per strada.
+                    kinds: vec![(1, CarrierType::Empty)],
                 },
             ],
         }
@@ -943,26 +931,58 @@ mod tests {
         assert_eq!(sample().seconds(), 2.0 / TRACE_FPS);
     }
 
-    /// Un'antenna sotto un gate ha una vita sua: i due stati devono restare
-    /// distinguibili anche se la cella e' la stessa.
+    /// Ogni oggetto ha il suo id, quindi due che condividono la cella - un gate
+    /// e l'antenna che gli sta sotto - restano due voci distinte in un elenco
+    /// solo. Era per non confonderli che prima ci volevano tre elenchi.
     #[test]
-    fn an_antenna_keeps_its_own_state_under_an_object() {
+    fn objects_sharing_a_cell_keep_their_own_state() {
         let reread = from_ron(&to_ron(&sample()).expect("scrittura")).expect("rilettura");
-        let closed = switchboard_up_to(&reread, 1);
+        let closed = folded(&reread, 1, |frame| &frame.switches);
 
-        assert_eq!(closed.track, vec![((3, 0), false)], "il gate e' chiuso");
-        assert_eq!(closed.under, vec![((3, 0), true)], "l'antenna e' accesa");
+        assert_eq!(closed, vec![(1, false), (2, true)]);
     }
 
-    /// Le registrazioni fatte prima delle antenne non hanno il piano di sotto e
-    /// devono continuare ad aprirsi.
+    /// Un istante senza cambi non ha proprio il campo, e si rilegge lo stesso.
     #[test]
-    fn an_old_recording_without_the_lower_layer_still_loads() {
-        let old = "(fps: 20.0, layout: (objects: []), frames: [(carriers: [], switches: [((1, 2), true)])])";
+    fn an_instant_without_changes_has_no_switches_at_all() {
+        let quiet = "(fps: 20.0, layout: (objects: []), frames: [(carriers: [])])";
 
-        let trace = from_ron(old).expect("rilettura");
+        let trace = from_ron(quiet).expect("rilettura");
 
-        assert!(trace.frames[0].under.is_empty());
+        assert!(trace.frames[0].switches.is_empty());
+    }
+
+    /// Il tipo di un carrier si scrive quando cambia, non a ogni istante: e'
+    /// uno stato, come l'acceso e spento degli oggetti. Un carrier che resta
+    /// com'e' non fa scrivere niente.
+    #[test]
+    fn the_kind_of_a_carrier_is_written_only_when_it_changes() {
+        let mut trace = sample();
+        // Un terzo istante in cui il carrier prosegue senza cambiare.
+        trace.frames.push(TraceFrame {
+            carriers: vec![TracedCarrier(1, 0.0, -20.0)],
+            ..Default::default()
+        });
+
+        let written = to_ron(&trace).expect("scrittura");
+        let reread = from_ron(&written).expect("rilettura");
+
+        assert_eq!(written.matches("WithTube").count(), 1, "{written}");
+        assert!(reread.frames[2].kinds.is_empty(), "niente da dire");
+        assert_eq!(
+            folded(&reread, 2, |frame| &frame.kinds),
+            vec![(1, CarrierType::Empty)],
+            "il tipo di allora e' la somma dei cambi fino a li'"
+        );
+    }
+
+    /// Una posizione e' una riga sola: id, x, y. Di righe cosi' un file ne
+    /// contiene decine di migliaia, e prima ne occupava quattro ciascuna.
+    #[test]
+    fn a_position_is_a_single_line() {
+        let written = to_ron(&sample()).expect("scrittura");
+
+        assert!(written.contains("(1, 10.0, -20.0)"), "{written}");
     }
 
     /// Il file porta con se' l'impianto: senza, le coordinate sarebbero numeri
@@ -979,10 +999,10 @@ mod tests {
     /// senza dire niente di nuovo.
     #[test]
     fn only_the_switches_that_changed_are_written() {
-        let before = [((3, 0), true), ((5, 0), false)];
-        let now = [((3, 0), false), ((5, 0), false)];
+        let before = [(1, true), (2, false)];
+        let now = [(1, false), (2, false)];
 
-        assert_eq!(changes(&now, &before), vec![((3, 0), false)]);
+        assert_eq!(changes(&now, &before), vec![(1, false)]);
         assert!(
             changes(&now, &now).is_empty(),
             "un istante identico al precedente non scrive niente"
@@ -1000,15 +1020,15 @@ mod tests {
     fn the_state_at_an_instant_is_the_sum_of_the_changes() {
         let trace = sample();
 
-        let start = switchboard_up_to(&trace, 0);
-        assert_eq!(start.track, vec![((3, 0), true)]);
+        let start = folded(&trace, 0, |frame| &frame.switches);
+        assert_eq!(start, vec![(1, true), (2, true)]);
 
-        let later = switchboard_up_to(&trace, 1);
-        assert_eq!(later.track, vec![((3, 0), false)], "il gate si e' chiuso");
+        let later = folded(&trace, 1, |frame| &frame.switches);
         assert_eq!(
-            later.under,
-            vec![((3, 0), true)],
-            "l'antenna non e' cambiata, ma il suo stato si porta avanti"
+            later,
+            vec![(1, false), (2, true)],
+            "il gate si e' chiuso; l'antenna non e' cambiata, ma il suo stato \
+             si porta avanti lo stesso"
         );
     }
 
@@ -1018,8 +1038,8 @@ mod tests {
     fn the_state_of_the_objects_travels_with_each_moment() {
         let trace = sample();
 
-        assert_eq!(trace.frames[0].switches, vec![((3, 0), true)]);
-        assert_eq!(trace.frames[1].switches, vec![((3, 0), false)]);
+        assert_eq!(trace.frames[0].switches, vec![(1, true), (2, true)]);
+        assert_eq!(trace.frames[1].switches, vec![(1, false)]);
 
         let reread = from_ron(&to_ron(&trace).expect("scrittura")).expect("rilettura");
 

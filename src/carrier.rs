@@ -200,7 +200,12 @@ pub struct CarrierVisualsPlugin;
 impl Plugin for CarrierVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_carrier_assets)
-            .add_systems(Update, attach_carrier_visuals);
+            // In fila: chi cambia tipo viene prima spogliato e poi rivestito
+            // nello stesso frame, senza passare un istante senza corpo.
+            .add_systems(
+                Update,
+                (undress_changed_carriers, attach_carrier_visuals).chain(),
+            );
     }
 }
 
@@ -267,6 +272,33 @@ const MONO_ADVANCE: f32 = 0.6;
 /// collare, dove sarebbe bianco su bianco.
 const LABEL_BOX: f32 = ID_CHARS * MONO_ADVANCE * LABEL_FONT_SIZE * LABEL_SCALE + 0.5;
 
+/// Di che tipo era il carrier quando gli e' stato dato un corpo. Serve ad
+/// accorgersi che il tipo e' cambiato: puo' succedere, un carrier vuoto puo'
+/// ricevere una provetta e uno pieno perderla.
+#[derive(Component)]
+struct Dressed(CarrierType);
+
+/// Chi non e' piu' com'era disegnato viene spogliato: il sistema che veste i
+/// carrier lo trova nudo e lo rifa' con l'aspetto giusto.
+fn undress_changed_carriers(
+    mut commands: Commands,
+    carriers: Query<(Entity, &Carrier, &Dressed, Option<&Children>), Changed<Carrier>>,
+) {
+    for (entity, carrier, dressed, children) in carriers.iter() {
+        if dressed.0 == carrier.kind {
+            continue;
+        }
+
+        for child in children.into_iter().flatten() {
+            commands.entity(*child).despawn();
+        }
+        commands
+            .entity(entity)
+            .remove::<Mesh2d>()
+            .remove::<Dressed>();
+    }
+}
+
 /// Da' un corpo ai carrier appena nati. Senza questo sistema esistono lo stesso e
 /// si muovono: semplicemente non li vede nessuno.
 fn attach_carrier_visuals(
@@ -290,7 +322,11 @@ fn attach_carrier_visuals(
 
         commands
             .entity(entity)
-            .insert((Mesh2d(mesh), MeshMaterial2d(material)))
+            .insert((
+                Mesh2d(mesh),
+                MeshMaterial2d(material),
+                Dressed(carrier.kind),
+            ))
             // Il collare sta fra la base e il numero: copre la base e fa da
             // fondo all'etichetta, che gli sta sopra.
             .with_child((

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::carrier::Carrier;
 use crate::grid;
 use crate::layout::{self, LayoutFile, Placed, Switches, place_in_cell, spawn_layout};
+use crate::name::{self, Identity, PieceId, PieceName};
 use crate::piece::{self, Facing, PieceShapes};
 use crate::simulation::SimulationState;
 
@@ -41,7 +42,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tool::CarrierSource => "Sorgente",
             Tool::Gate => "Gate",
@@ -110,7 +111,11 @@ fn occupant_on<'a>(
 /// linea il clic e' suo; altrove nella cella e' di quello che gli sta sotto, che
 /// li' e' scoperto e si vede. E' cosi' che si accende l'antenna al centro della
 /// cella di un gate, la cui sbarra occupa solo un lato.
-fn clicked_piece<'a, I>(point: Vec2, cell: IVec2, objects: impl Fn() -> I) -> Option<(Entity, Tool)>
+pub fn clicked_piece<'a, I>(
+    point: Vec2,
+    cell: IVec2,
+    objects: impl Fn() -> I,
+) -> Option<(Entity, Tool)>
 where
     I: Iterator<Item = (Entity, &'a Placed, &'a Facing)>,
 {
@@ -287,7 +292,7 @@ fn cursor_cell(
 /// Il punto del mondo sotto il mouse. Serve a chi non si accontenta della cella:
 /// dentro una cella ci sono due oggetti sovrapposti, e per sapere quale si sta
 /// puntando bisogna guardare dove esattamente e' caduto il clic.
-fn cursor_world(
+pub fn cursor_world(
     windows: &Query<&Window>,
     camera_query: &Query<(&Camera, &GlobalTransform)>,
     ui_interactions: &Query<&Interaction>,
@@ -601,6 +606,7 @@ fn place_selected_tool(
     ui_interactions: Query<&Interaction>,
     mut switches: Switches,
     selected: Res<SelectedTool>,
+    identities: Query<(&PieceId, &PieceName)>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -665,7 +671,22 @@ fn place_selected_tool(
             (_, None) => Facing::default(),
         };
 
-        place_in_cell(&mut commands, tool, cell, facing);
+        // Ogni oggetto nasce gia' identificato: il numero per le registrazioni,
+        // il nome per mqtt. Il nome si cambia dal pannello, ma non resta mai
+        // senza, e l'id non cambia mai.
+        let names: Vec<String> = identities.iter().map(|(_, name)| name.0.clone()).collect();
+        let ids: Vec<u32> = identities.iter().map(|(id, _)| id.0).collect();
+
+        place_in_cell(
+            &mut commands,
+            tool,
+            cell,
+            facing,
+            Identity {
+                id: name::next_free_id(&ids),
+                name: name::next_free(tool, &names),
+            },
+        );
     }
 }
 
@@ -862,7 +883,7 @@ fn handle_layout_buttons(
     mut commands: Commands,
     buttons: Query<(&Interaction, &LayoutButton), Changed<Interaction>>,
     placed: Query<(Entity, &Placed)>,
-    pieces: Query<(&Placed, &Facing)>,
+    pieces: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
     carriers: Query<Entity, With<Carrier>>,
     layout_file: Res<LayoutFile>,
     mut notice: ResMut<SaveNotice>,
