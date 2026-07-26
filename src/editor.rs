@@ -157,9 +157,10 @@ where
 
     // Prima chi ha una figura sotto il puntatore, e in ordine di piano: un
     // pezzo di guida vale come area tutta la sua cella, quindi senza un ordine
-    // finirebbe per rubare il clic all'oggetto che ci sta sopra - e non avendo
-    // niente da comandare, il clic sembrerebbe non fare niente.
-    for layer in [Layer::Track, Layer::Side, Layer::Rail] {
+    // finirebbe per rubare il clic a chiunque ci stia sopra - e non avendo
+    // niente da comandare, il clic sembrerebbe non fare niente. L'antenna sta
+    // in mezzo: sul suo cerchio risponde lei, fuori risponde la guida.
+    for layer in [Layer::Track, Layer::Side, Layer::Under, Layer::Rail] {
         let on_the_figure = objects().find(|(_, placed, facing)| {
             placed.cell == cell
                 && placed.tool.layer() == layer
@@ -1330,6 +1331,38 @@ mod tests {
             clicked_piece(far_side, cell, entries).map(|(_, tool)| tool),
             Some(Tool::Antenna),
             "fuori dalla figura del gate risponde chi gli sta sotto"
+        );
+    }
+
+    /// Un pezzo di guida vale come area tutta la sua cella, ma non deve rubare
+    /// il clic all'antenna che gli sta sopra: sul cerchio dell'antenna risponde
+    /// lei, fuori risponde la guida. Prima, in una cella con una guida,
+    /// l'antenna era irraggiungibile - non si poteva ne' disabilitare ne'
+    /// leggerne il nome passandoci sopra.
+    #[test]
+    fn a_guide_does_not_steal_the_click_from_the_antenna() {
+        let cell = IVec2::new(2, -3);
+        let centre = grid::cell_center(cell);
+        let objects = cell_with([Tool::Guide, Tool::Antenna]);
+        let entries = || {
+            objects
+                .iter()
+                .map(|(entity, placed, facing)| (*entity, placed, facing))
+        };
+
+        // Sul cerchio dell'antenna: e' suo. L'antenna nasce scostata verso il
+        // lato in cui e' girata, quindi la si cerca li'.
+        let on_the_antenna = centre + Vec2::new(-crate::piece::ANTENNA_OFFSET, 0.0);
+        assert_eq!(
+            clicked_piece(on_the_antenna, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Antenna)
+        );
+
+        // In un angolo della cella, lontano dal cerchio: risponde la guida.
+        let corner = centre + Vec2::splat(grid::GRID_STEP / 2.0 - 2.0);
+        assert_eq!(
+            clicked_piece(corner, cell, entries).map(|(_, tool)| tool),
+            Some(Tool::Guide)
         );
     }
 

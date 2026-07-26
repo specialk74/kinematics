@@ -49,10 +49,13 @@ impl Divert {
     /// proseguire il flusso: la via dritta esiste, semplicemente non viene
     /// deviata. Dall'ATR invece non si passa, perche' quella via dritta non c'e':
     /// spento non devia piu' e i carrier si fermano davanti.
-    /// Un ATR disabilitato invece non blocca niente: fuori servizio vuol dire
-    /// come se non ci fosse.
+    /// Vale sia da disabilitato sia da non comandato, e non e' un dettaglio:
+    /// nella corsia secondaria la via dritta non esiste, quindi un ATR che non
+    /// lavora non e' un passaggio aperto - e' un fondo cieco. Il carrier resta
+    /// li' perche' gli manca la spinta per rientrare, non perche' qualcuno gli
+    /// abbia messo una sbarra davanti.
     pub fn is_blocking(&self, switch: Switch) -> bool {
-        switch.enabled && !switch.active && self.kind == DivertKind::Atr
+        !switch.working() && self.kind == DivertKind::Atr
     }
 
     /// Su chi agisce. Per ora il divert e' uno smistatore e prende solo i
@@ -406,12 +409,13 @@ mod tests {
         );
         assert!(atr.catches(ON, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
 
-        // E fuori servizio non sbarra affatto: e' come se non ci fosse.
+        // E fuori servizio sbarra allo stesso modo: senza la spinta per
+        // rientrare, dalla corsia secondaria non si va da nessuna parte.
         let out_of_service = Switch {
             enabled: false,
             active: false,
         };
-        assert!(!atr.is_blocking(out_of_service));
+        assert!(atr.is_blocking(out_of_service));
     }
 
     /// Il divert spento e' invece trasparente: la via dritta c'e' e resta aperta.
