@@ -25,7 +25,7 @@ mod source;
 mod trace;
 mod turner;
 
-use antenna::AntennaVisualsPlugin;
+use antenna::{AntennaPlugin, AntennaVisualsPlugin};
 use camera::CameraPlugin;
 use carrier::{CarrierPlugin, CarrierVisualsPlugin};
 use cli::Options;
@@ -124,6 +124,7 @@ fn main() {
         // sensori devono vedere passare i carrier comunque.
         TracePlugin,
         SensorPlugin,
+        AntennaPlugin,
     ))
     .run();
 }

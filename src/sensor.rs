@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
-use crate::carrier::{Carrier, CarrierType, Heading};
+use crate::carrier::{COLLAR_RADIUS, Carrier, CarrierType, Heading};
 use crate::grid::GRID_STEP;
-use crate::piece::{self, Arrow, BAR_LENGTH, Facing, PieceShapes};
+use crate::piece::{self, Arrow, Facing, PieceShapes};
 
 /// Che cosa guarda il sensore. E' l'unica differenza fra i due: la zona che
 /// sorvegliano e il modo in cui si accendono sono gli stessi.
@@ -35,14 +35,18 @@ impl Sensor {
     }
 }
 
-/// Vero se il carrier sta passando davanti al sensore. Il sensore guarda di
-/// traverso alla propria parete, come una fotocellula: conta dove si trova il
-/// carrier nella cella, non il contatto con la sbarra, che non avverrebbe mai
+/// Vero se il carrier sta interrompendo il fascio del sensore. Il fascio e' una
+/// riga sottile che dalla parete taglia la corsia di traverso, come una
+/// fotocellula vera: non e' il contatto con la sbarra, che non avverrebbe mai
 /// visto che il carrier passa al centro e la sbarra sta sul bordo.
+///
+/// A interromperlo e' il collare, non la base: e' la ragione per cui due carrier
+/// a contatto danno due letture distinte invece di una sola lunga. Le basi si
+/// toccano, i collari no.
 pub fn in_beam(sensor: Vec3, facing: Heading, carrier: Vec3) -> bool {
     let local = facing.rotation().inverse() * (carrier - sensor);
 
-    local.x.abs() <= BAR_LENGTH / 2.0 && local.y.abs() <= GRID_STEP / 2.0
+    local.x.abs() <= COLLAR_RADIUS && local.y.abs() <= GRID_STEP / 2.0
 }
 
 /// La parte che conta anche senza interfaccia: chi vede chi.
@@ -182,7 +186,7 @@ fn refresh_sensor_look(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::carrier::Motion;
+    use crate::carrier::{CARRIER_SIZE, Motion};
 
     /// Fa girare il sistema vero su una scena minima: un sensore e un carrier
     /// nella stessa cella. E' l'unico modo di verificare quello che conta
@@ -265,6 +269,24 @@ mod tests {
             !in_beam(at, Heading::Up, Vec3::new(GRID_STEP, 0.0, 0.0)),
             "nemmeno la corsia accanto"
         );
+    }
+
+    /// Il motivo del collare: due carrier a contatto sono due letture, non una.
+    /// A meta' strada fra i due il fascio e' libero, quindi il sensore si spegne
+    /// e si riaccende invece di restare acceso per tutta la coppia.
+    #[test]
+    fn two_touching_carriers_break_the_beam_one_at_a_time() {
+        let first = Vec3::ZERO;
+        let second = Vec3::new(CARRIER_SIZE, 0.0, 0.0);
+        let between = Vec3::new(CARRIER_SIZE / 2.0, 0.0, 0.0);
+
+        // Il sensore che guarda esattamente in mezzo ai due non vede nessuno.
+        assert!(!in_beam(between, Heading::Up, first));
+        assert!(!in_beam(between, Heading::Up, second));
+
+        // Ma davanti a ciascuno dei due si accende.
+        assert!(in_beam(first, Heading::Up, first));
+        assert!(in_beam(second, Heading::Up, second));
     }
 
     /// La zona si gira con il sensore: montato su un'altra parete guarda lungo

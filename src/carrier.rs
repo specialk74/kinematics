@@ -14,6 +14,11 @@ use crate::turner::Turner;
 pub const BELT_SPEED: f32 = 100.0;
 pub const CARRIER_DIVERT_SPEED: f32 = 50.0;
 pub const CARRIER_RADIUS: f32 = 15.0;
+/// Il collare: la parte stretta che sporge sopra la base e regge la provetta.
+/// E' quello che vedono i sensori, e siccome e' piu' stretto della base due
+/// carrier a contatto restano due cose distinte anche per una fotocellula: fra
+/// un collare e l'altro il fascio torna libero.
+pub const COLLAR_RADIUS: f32 = 9.0;
 pub const CARRIER_THICKNESS: f32 = 3.0;
 /// Distanza minima fra i centri di due carrier: diametro piu' un po' di margine.
 pub const CARRIER_SIZE: f32 = CARRIER_RADIUS * 2.0 + 4.0;
@@ -207,6 +212,13 @@ pub struct CarrierAssets {
     empty_material: Handle<ColorMaterial>,
     with_tube_mesh: Handle<Mesh>,
     with_tube_material: Handle<ColorMaterial>,
+    /// Il disco del collare: fa da fondo scuro al numero, che altrimenti
+    /// finirebbe sul bianco della base e non si leggerebbe.
+    collar_disc_mesh: Handle<Mesh>,
+    /// L'anello che segna il bordo del collare sul carrier vuoto.
+    collar_rim_mesh: Handle<Mesh>,
+    empty_collar_material: Handle<ColorMaterial>,
+    with_tube_collar_material: Handle<ColorMaterial>,
 }
 
 fn setup_carrier_assets(
@@ -223,6 +235,14 @@ fn setup_carrier_assets(
         empty_material: materials.add(Color::WHITE),
         with_tube_mesh: meshes.add(Circle::new(CARRIER_RADIUS)),
         with_tube_material: materials.add(Color::srgb(0.0, 0.8, 0.2)),
+        collar_disc_mesh: meshes.add(Circle::new(COLLAR_RADIUS)),
+        // Sottile e sul bordo esterno: dentro deve restare posto per il numero.
+        collar_rim_mesh: meshes.add(Annulus::new(COLLAR_RADIUS - 1.0, COLLAR_RADIUS)),
+        // Scuro ma non quanto lo sfondo: sul carrier vuoto il collare si vede
+        // lo stesso, e il numero bianco che ci sta sopra si legge.
+        empty_collar_material: materials.add(Color::srgb(0.13, 0.13, 0.16)),
+        // Verde piu' cupo: stessa cosa sul carrier pieno.
+        with_tube_collar_material: materials.add(Color::srgb(0.0, 0.55, 0.14)),
     });
 }
 
@@ -231,9 +251,21 @@ fn setup_carrier_assets(
 /// sfocata, perche' lo zoom ingrandisce i pixel gia' prodotti. Cosi' invece la
 /// nitidezza c'e' fino a un ingrandimento di 1/LABEL_SCALE.
 const LABEL_FONT_SIZE: f32 = 32.0;
-const LABEL_SCALE: f32 = 0.11;
-/// Lato del quadrato inscritto nel cerchio: il testo non ne esce mai.
-const LABEL_BOX: f32 = CARRIER_RADIUS * std::f32::consts::SQRT_2;
+/// Un identificativo e' lungo dieci caratteri (`0x44000000`), e deve starci per
+/// intero dentro il collare: da qui la misura, che e' piccola per forza. A
+/// occhio nudo e' un segno; si legge ingrandendo, ed e' per questo che il testo
+/// viene rasterizzato grande e poi rimpicciolito.
+const LABEL_SCALE: f32 = 0.06;
+/// Un identificativo occupa dieci caratteri: `0x` piu' otto cifre.
+const ID_CHARS: f32 = 10.0;
+/// Passo di FiraMono, il font di serie: e' a spaziatura fissa, 0.6 em per
+/// carattere. Il valore viene dal file del font, non da una stima a occhio.
+const MONO_ADVANCE: f32 = 0.6;
+/// Larghezza del riquadro del testo: quanto basta a tenere un identificativo
+/// intero su una riga sola, con un filo di margine. Piu' stretto lo manderebbe
+/// a capo in mezzo alle cifre; piu' largo lo porterebbe sull'anello del
+/// collare, dove sarebbe bianco su bianco.
+const LABEL_BOX: f32 = ID_CHARS * MONO_ADVANCE * LABEL_FONT_SIZE * LABEL_SCALE + 0.5;
 
 /// Da' un corpo ai carrier appena nati. Senza questo sistema esistono lo stesso e
 /// si muovono: semplicemente non li vede nessuno.
@@ -243,18 +275,41 @@ fn attach_carrier_visuals(
     carriers: Query<(Entity, &Carrier), Without<Mesh2d>>,
 ) {
     for (entity, carrier) in carriers.iter() {
-        let (mesh, material) = match carrier.kind {
+        let (mesh, material, collar_material) = match carrier.kind {
             CarrierType::WithTube => (
                 assets.with_tube_mesh.clone(),
                 assets.with_tube_material.clone(),
+                assets.with_tube_collar_material.clone(),
             ),
-            CarrierType::Empty => (assets.empty_mesh.clone(), assets.empty_material.clone()),
+            CarrierType::Empty => (
+                assets.empty_mesh.clone(),
+                assets.empty_material.clone(),
+                assets.empty_collar_material.clone(),
+            ),
         };
 
         commands
             .entity(entity)
             .insert((Mesh2d(mesh), MeshMaterial2d(material)))
-            .with_child(carrier_label(carrier));
+            // Il collare sta fra la base e il numero: copre la base e fa da
+            // fondo all'etichetta, che gli sta sopra.
+            .with_child((
+                Mesh2d(assets.collar_disc_mesh.clone()),
+                MeshMaterial2d(collar_material),
+                Transform::from_xyz(0.0, 0.0, 0.05),
+            ));
+
+        // Sul carrier vuoto il disco scuro da solo non si distinguerebbe dallo
+        // sfondo: l'anello dice dove finisce il collare.
+        if carrier.kind == CarrierType::Empty {
+            commands.entity(entity).with_child((
+                Mesh2d(assets.collar_rim_mesh.clone()),
+                MeshMaterial2d(assets.empty_material.clone()),
+                Transform::from_xyz(0.0, 0.0, 0.06),
+            ));
+        }
+
+        commands.entity(entity).with_child(carrier_label(carrier));
     }
 }
 
@@ -262,7 +317,9 @@ fn attach_carrier_visuals(
 /// c'e'. Va a capo su qualsiasi carattere, perche' un sample_id non ha spazi in
 /// cui spezzarsi.
 fn carrier_label(carrier: &Carrier) -> impl Bundle {
-    let mut text = carrier.carrier_id.to_string();
+    // In esadecimale a otto cifre, che e' la forma in cui questi
+    // identificativi si leggono nell'impianto vero: `0x44000000`.
+    let mut text = format!("0x{:08X}", carrier.carrier_id);
     if let Some(sample_id) = &carrier.sample_id {
         text.push('\n');
         text.push_str(sample_id.as_str());
@@ -276,8 +333,12 @@ fn carrier_label(carrier: &Carrier) -> impl Bundle {
         },
         TextColor(Color::WHITE),
         TextLayout::new(Justify::Center, LineBreak::AnyCharacter),
-        // I limiti sono nello spazio del testo, quindi prima della riduzione.
-        TextBounds::new(LABEL_BOX / LABEL_SCALE, LABEL_BOX / LABEL_SCALE),
+        // Solo la larghezza, che serve a mandare a capo. Fissare anche
+        // l'altezza allinea il testo in cima al riquadro invece di centrarlo, e
+        // il numero finiva a cavallo del collare: bianco su bianco, illeggibile.
+        // Senza limite in altezza il riquadro e' alto quanto il testo, quindi
+        // resta centrato nel foro del collare.
+        TextBounds::new_horizontal(LABEL_BOX / LABEL_SCALE),
         Transform::from_xyz(0.0, 0.0, 0.1).with_scale(Vec3::splat(LABEL_SCALE)),
     )
 }
