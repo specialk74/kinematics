@@ -1,11 +1,13 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, NextCarrierId};
-use crate::editor::{BUTTON_IDLE, BUTTON_UNAVAILABLE, Mode, button_label, top_button};
+use crate::editor::{BUTTON_READY, BUTTON_UNAVAILABLE, Mode, button_label, top_button};
 use crate::source::CarrierSource;
 use crate::trace::Replay;
 
-const RUNNING_COLOR: Color = Color::srgb(0.20, 0.20, 0.24);
+/// Mentre gira, il bottone dice "Pausa" ed e' premibile: verde come gli altri
+/// comandi disponibili. In pausa resta l'arancio, che segnala uno stato in
+/// corso invece della semplice disponibilita'.
 const PAUSED_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
 
 /// Stato del mondo simulato. In pausa i carrier non si muovono e le sorgenti non
@@ -36,7 +38,8 @@ pub struct SimulationPlugin;
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<SimulationState>();
+        app.init_state::<SimulationState>()
+            .init_resource::<HasRun>();
     }
 }
 
@@ -55,10 +58,20 @@ impl Plugin for SimulationControlsPlugin {
         )
         // Passando all'editor il tempo si ferma: si costruisce l'impianto, non
         // lo si guarda funzionare.
-        .add_systems(OnEnter(Mode::Editing), hold_still_in_editor)
+        .add_systems(
+            OnEnter(Mode::Editing),
+            (hold_still_in_editor, clear_the_belt),
+        )
+        // Basta che sia partita una volta perche' ci sia qualcosa da riavviare.
+        .add_systems(OnEnter(SimulationState::Running), remember_it_ran)
         .add_systems(
             Update,
-            (toggle_simulation, refresh_pause_button, restart_simulation),
+            (
+                toggle_simulation,
+                refresh_pause_button,
+                restart_simulation,
+                refresh_restart_button,
+            ),
         );
     }
 }
@@ -66,7 +79,7 @@ impl Plugin for SimulationControlsPlugin {
 fn setup_pause_button(mut commands: Commands) {
     commands.spawn((
         top_button(0),
-        BackgroundColor(RUNNING_COLOR),
+        BackgroundColor(BUTTON_UNAVAILABLE),
         PauseButton,
         children![(button_label("Pausa"), PauseLabel)],
     ));
@@ -75,10 +88,43 @@ fn setup_pause_button(mut commands: Commands) {
 fn setup_restart_button(mut commands: Commands) {
     commands.spawn((
         top_button(2),
-        BackgroundColor(BUTTON_IDLE),
+        BackgroundColor(BUTTON_UNAVAILABLE),
         RestartButton,
         children![button_label("Riavvia")],
     ));
+}
+
+/// Se la simulazione e' stata avviata almeno una volta da quando e' stata
+/// sgombrata. Prima di allora non c'e' niente da far ripartire.
+#[derive(Resource, Default)]
+pub struct HasRun(bool);
+
+/// Riavviare ha senso solo dove c'e' traffico da svuotare: in simulazione, e
+/// solo dopo che e' partita. In editor il tempo e' fermo, e durante una
+/// riproduzione i carrier arrivano dal file, quindi toglierli non direbbe niente.
+fn restart_available(mode: &State<Mode>, state: &State<SimulationState>, has_run: &HasRun) -> bool {
+    has_run.0 && *mode.get() == Mode::Simulating && *state.get() != SimulationState::Replaying
+}
+
+fn refresh_restart_button(
+    mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
+    has_run: Res<HasRun>,
+    mut buttons: Query<&mut BackgroundColor, With<RestartButton>>,
+) {
+    if !mode.is_changed() && !state.is_changed() && !has_run.is_changed() {
+        return;
+    }
+
+    let colour = if restart_available(&mode, &state, &has_run) {
+        BUTTON_READY
+    } else {
+        BUTTON_UNAVAILABLE
+    };
+
+    for mut background in buttons.iter_mut() {
+        background.0 = colour;
+    }
 }
 
 /// Svuota il nastro e riparte da capo: spariscono i carrier, la numerazione
@@ -87,16 +133,24 @@ fn setup_restart_button(mut commands: Commands) {
 fn restart_simulation(
     mut commands: Commands,
     buttons: Query<&Interaction, (Changed<Interaction>, With<RestartButton>)>,
+    mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
+    mut has_run: ResMut<HasRun>,
     carriers: Query<Entity, With<Carrier>>,
     mut sources: Query<&mut CarrierSource>,
     mut ids: ResMut<NextCarrierId>,
 ) {
-    if !buttons
+    let pressed = buttons
         .iter()
-        .any(|interaction| *interaction == Interaction::Pressed)
-    {
+        .any(|interaction| *interaction == Interaction::Pressed);
+
+    if !pressed || !restart_available(&mode, &state, &has_run) {
         return;
     }
+
+    // Sgombrata la scena non c'e' piu' niente da far ripartire, finche' non si
+    // preme di nuovo Play.
+    has_run.0 = false;
 
     for entity in carriers.iter() {
         commands.entity(entity).despawn();
@@ -121,6 +175,29 @@ fn hold_still_in_editor(
     if *mode.get() == Mode::Editing && *state.get() == SimulationState::Running {
         next_state.set(SimulationState::Paused);
     }
+}
+
+fn remember_it_ran(mut has_run: ResMut<HasRun>) {
+    has_run.0 = true;
+}
+
+/// Tornando all'editor la scena si sgombra: i carrier in giro sono il risultato
+/// di una simulazione, e mentre si rimette mano all'impianto non hanno piu'
+/// niente a che vedere con quello che si sta costruendo.
+fn clear_the_belt(
+    mut commands: Commands,
+    mut has_run: ResMut<HasRun>,
+    carriers: Query<Entity, With<Carrier>>,
+    mut sources: Query<&mut CarrierSource>,
+) {
+    for entity in carriers.iter() {
+        commands.entity(entity).despawn();
+    }
+    for mut source in sources.iter_mut() {
+        source.restart();
+    }
+
+    has_run.0 = false;
 }
 
 fn toggle_simulation(
@@ -176,10 +253,10 @@ fn refresh_pause_button(
     }
 
     let (colour, text) = match state.get() {
-        SimulationState::Running => (RUNNING_COLOR, "Pausa"),
+        SimulationState::Running => (BUTTON_READY, "Pausa"),
         SimulationState::Paused => (PAUSED_COLOR, "Play"),
         SimulationState::Replaying if replay.is_paused() => (PAUSED_COLOR, "Riprendi"),
-        SimulationState::Replaying => (RUNNING_COLOR, "Pausa"),
+        SimulationState::Replaying => (BUTTON_READY, "Pausa"),
     };
 
     for mut background in buttons.iter_mut() {

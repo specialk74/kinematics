@@ -6,6 +6,7 @@ use crate::grid;
 use crate::layout::Placed;
 use crate::name::{NameRow, Naming, PieceName};
 use crate::piece::{Facing, PIECE_SIZE};
+use crate::simulation::SimulationState;
 
 const PANEL_WIDTH: f32 = 190.0;
 /// Sotto ai bottoni in alto a destra, sopra alla barra di riproduzione.
@@ -46,6 +47,7 @@ impl Plugin for NamePanelPlugin {
                     scroll_panel,
                     blink_highlight,
                     show_hovered_name,
+                    hide_during_replay,
                 ),
             );
     }
@@ -106,6 +108,34 @@ fn setup_hover(mut commands: Commands) {
         Visibility::Hidden,
         HoverLabel,
     ));
+}
+
+/// Durante una riproduzione l'elenco sparisce: gli oggetti in scena sono quelli
+/// del file, e sceglierne uno non porterebbe da nessuna parte, visto che
+/// rinominarli mentre scorre la registrazione non ha senso.
+fn hide_during_replay(
+    state: Res<State<SimulationState>>,
+    mut naming: ResMut<Naming>,
+    mut panel: Query<&mut Node, With<NamePanel>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+
+    let replaying = *state.get() == SimulationState::Replaying;
+    if replaying {
+        // Chi stava scrivendo un nome resta senza pannello: meglio chiudere la
+        // scrittura che lasciarla aperta su una riga che non si vede piu'.
+        naming.editing = None;
+    }
+
+    for mut node in panel.iter_mut() {
+        node.display = if replaying {
+            Display::None
+        } else {
+            Display::Flex
+        };
+    }
 }
 
 /// Rifa' l'elenco quando c'e' motivo: un oggetto in piu' o in meno, un nome

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
 use crate::editor::{
-    BUTTON_IDLE, BUTTON_UNAVAILABLE, Mode, PALETTE_WIDTH, button_label, top_button,
+    BUTTON_IDLE, BUTTON_READY, BUTTON_UNAVAILABLE, Mode, PALETTE_WIDTH, button_label, top_button,
 };
 use crate::layout::{Layout, Placed, spawn_layout};
 use crate::name::{PieceId, PieceName};
@@ -239,6 +239,14 @@ fn folded<T: Copy + PartialEq>(
     state
 }
 
+/// L'impianto che c'era prima di far partire una riproduzione. Una
+/// registrazione porta con se' il proprio layout e per mostrarlo deve sgombrare
+/// la scena: senza mettere da parte quello di prima, finita la riproduzione il
+/// lavoro dell'editor sarebbe perso. Se la scena era vuota si mette da parte il
+/// vuoto, e alla fine si torna al vuoto.
+#[derive(Resource, Default)]
+pub struct ParkedLayout(Option<Layout>);
+
 #[derive(Resource, Default)]
 pub struct Replay {
     trace: Option<Trace>,
@@ -337,6 +345,7 @@ pub struct TraceVisualsPlugin;
 impl Plugin for TraceVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Replay>()
+            .init_resource::<ParkedLayout>()
             .init_resource::<ReplayNotice>()
             .add_systems(Startup, setup_trace_buttons)
             .add_systems(
@@ -509,7 +518,7 @@ fn toggle_recording(
     mut recording: ResMut<Recording>,
     placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
 ) {
-    if !pressed(&buttons) || !tape_available(&mode, &state) {
+    if !pressed(&buttons) || !can_record(&mode, &state, &recording) {
         return;
     }
 
@@ -534,12 +543,53 @@ fn begin(recording: &mut Recording) {
     info!("registrazione avviata");
 }
 
-/// Vero se i comandi del nastro rispondono. In editor non rispondono: non c'e'
-/// niente da registrare, e far partire una riproduzione spegnerebbe l'editor
-/// senza preavviso. Una riproduzione gia' in corso invece si deve poter fermare
-/// da qualunque modo, altrimenti si resta chiusi dentro.
-fn tape_available(mode: &State<Mode>, state: &State<SimulationState>) -> bool {
-    *mode.get() == Mode::Simulating || *state.get() == SimulationState::Replaying
+/// Mette da parte l'impianto che c'e' adesso, se non c'e' gia' qualcosa in
+/// serbo: una seconda riproduzione avviata di seguito non deve seppellire il
+/// layout dell'editor con quello della registrazione precedente.
+fn park_layout<'a>(
+    parked: &mut ParkedLayout,
+    pieces: impl Iterator<Item = (&'a Placed, &'a Facing, &'a PieceId, &'a PieceName)>,
+) {
+    if parked.0.is_none() {
+        parked.0 = Some(crate::layout::collect(pieces));
+    }
+}
+
+/// Rimette in scena l'impianto di prima e toglie quello della registrazione.
+/// Senza niente in serbo non fa nulla: vuol dire che nessuna riproduzione ha
+/// mai sgombrato la scena.
+fn unpark_layout(
+    commands: &mut Commands,
+    parked: &mut ParkedLayout,
+    placed: &Query<Entity, With<Placed>>,
+) {
+    let Some(layout) = parked.0.take() else {
+        return;
+    };
+
+    for entity in placed.iter() {
+        commands.entity(entity).despawn();
+    }
+
+    spawn_layout(commands, &layout);
+}
+
+/// Vero se si puo' registrare o smettere di registrare. In editor non c'e'
+/// niente da registrare, perche' il tempo sta fermo; durante una riproduzione
+/// nemmeno, perche' quello che si vede arriva da un file e riscriverlo non
+/// aggiungerebbe niente. Una registrazione in corso invece si deve poter
+/// chiudere sempre, altrimenti resterebbe aperta.
+fn can_record(mode: &State<Mode>, state: &State<SimulationState>, recording: &Recording) -> bool {
+    recording.active
+        || (*mode.get() == Mode::Simulating && *state.get() != SimulationState::Replaying)
+}
+
+/// Vero se si puo' far partire o fermare una riproduzione. Si puo' quasi
+/// sempre, editor compreso: rivedere una registrazione e' un'azione a se',
+/// e prende lo schermo per conto suo. L'unico momento in cui non si puo' e'
+/// mentre si sta registrando: le due cose si pesterebbero i piedi.
+fn can_replay(recording: &Recording) -> bool {
+    !recording.active
 }
 
 /// Chiude la registrazione e la scrive su file, layout compreso.
@@ -556,7 +606,7 @@ fn stop_recording(
 
     let trace = Trace {
         fps: TRACE_FPS,
-        layout: crate::layout::collect(placed),
+        layout: crate::layout::collect(placed.iter()),
         frames: std::mem::take(&mut recording.frames),
     };
     let path = trace_path();
@@ -633,15 +683,17 @@ fn save_on_exit(
 fn toggle_replay(
     mut commands: Commands,
     buttons: Query<&Interaction, (Changed<Interaction>, With<ReplayButton>)>,
-    mode: Res<State<Mode>>,
+    recording: Res<Recording>,
     mut replay: ResMut<Replay>,
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
     mut notice: ResMut<ReplayNotice>,
+    mut parked: ResMut<ParkedLayout>,
     lists: Query<Entity, With<TraceList>>,
     carriers: Query<Entity, With<Carrier>>,
+    placed: Query<Entity, With<Placed>>,
 ) {
-    if !pressed(&buttons) || !tape_available(&mode, &state) {
+    if !pressed(&buttons) || !can_replay(&recording) {
         return;
     }
 
@@ -653,6 +705,7 @@ fn toggle_replay(
         for entity in carriers.iter() {
             commands.entity(entity).despawn();
         }
+        unpark_layout(&mut commands, &mut parked, &placed);
         next_state.set(SimulationState::Paused);
         info!("riproduzione interrotta");
         return;
@@ -724,7 +777,9 @@ fn open_trace_list(commands: &mut Commands, traces: &[String]) {
 /// Un clic su una voce dell'elenco fa partire quella registrazione.
 fn choose_trace(
     mut commands: Commands,
-    mode: Res<State<Mode>>,
+    recording: Res<Recording>,
+    mut parked: ResMut<ParkedLayout>,
+    pieces: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
     entries: Query<(&Interaction, &TraceEntry), Changed<Interaction>>,
     lists: Query<Entity, With<TraceList>>,
     mut replay: ResMut<Replay>,
@@ -732,9 +787,8 @@ fn choose_trace(
     mut next_state: ResMut<NextState<SimulationState>>,
     carriers: Query<Entity, With<Carrier>>,
     placed: Query<(Entity, &Placed)>,
-    state: Res<State<SimulationState>>,
 ) {
-    if !tape_available(&mode, &state) {
+    if !can_replay(&recording) {
         return;
     }
 
@@ -750,6 +804,8 @@ fn choose_trace(
             // Si sgombra tutto: quello che si vedra' arriva dal file, impianto
             // compreso. Riprodurre una registrazione sopra un layout diverso
             // mostrerebbe carrier che sfilano fra oggetti che non c'entrano.
+            // Quello che c'era si mette da parte e torna alla fine.
+            park_layout(&mut parked, pieces.iter());
             for entity in carriers.iter() {
                 commands.entity(entity).despawn();
             }
@@ -782,6 +838,8 @@ fn play_frames(
     mut carriers: Query<(Entity, &mut Carrier)>,
     mut positions: Query<&mut Transform>,
     mut objects: Query<(&PieceId, &mut Switch)>,
+    mut parked: ResMut<ParkedLayout>,
+    placed: Query<Entity, With<Placed>>,
 ) {
     let Some(fps) = replay.trace.as_ref().map(|trace| trace.fps) else {
         return;
@@ -815,10 +873,12 @@ fn play_frames(
             info!("riproduzione finita");
             replay.trace = None;
             // Come per lo stop: quello che si vedeva era la registrazione, non
-            // la simulazione, e non deve sopravviverle.
+            // la simulazione, e non deve sopravviverle. Impianto compreso: torna
+            // quello che c'era prima, o il vuoto se non c'era niente.
             for (entity, _) in carriers.iter() {
                 commands.entity(entity).despawn();
             }
+            unpark_layout(&mut commands, &mut parked, &placed);
             next_state.set(SimulationState::Paused);
             return;
         }
@@ -957,13 +1017,12 @@ fn refresh_buttons(
     }
 
     let replaying = *state.get() == SimulationState::Replaying;
-    let available = tape_available(&mode, &state);
 
     for mut background in record_buttons.iter_mut() {
-        background.0 = match (available, recording.active) {
+        background.0 = match (can_record(&mode, &state, &recording), recording.active) {
             (false, _) => BUTTON_UNAVAILABLE,
             (true, true) => RECORDING_COLOR,
-            (true, false) => BUTTON_IDLE,
+            (true, false) => BUTTON_READY,
         };
     }
     for mut label in record_labels.iter_mut() {
@@ -972,11 +1031,11 @@ fn refresh_buttons(
 
     // Un messaggio in corso ha la precedenza: e' l'unico momento in cui il
     // bottone deve spiegare qualcosa invece di dire cosa fa.
-    let (colour, text) = match (pending, replaying, available) {
+    let (colour, text) = match (pending, replaying, can_replay(&recording)) {
         (Some(message), _, _) => (NOTICE_COLOR, message),
         (None, true, _) => (REPLAYING_COLOR, "Stop"),
         (None, false, false) => (BUTTON_UNAVAILABLE, "Riproduci"),
-        (None, false, true) => (BUTTON_IDLE, "Riproduci"),
+        (None, false, true) => (BUTTON_READY, "Riproduci"),
     };
 
     for mut background in replay_buttons.iter_mut() {
@@ -997,11 +1056,27 @@ pub fn start_recording(mut recording: ResMut<Recording>) {
 pub fn play_from_file(
     commands: &mut Commands,
     replay: &mut Replay,
+    parked: &mut ParkedLayout,
+    pieces: &Query<(Entity, &Placed, &Facing, &PieceId, &PieceName)>,
     next_state: &mut NextState<SimulationState>,
     path: &str,
 ) {
     match load(path) {
         Ok(trace) => {
+            // Si mette da parte quello che c'e' e si sgombra la scena, come fa
+            // la scelta dal pannello: il layout passato con --layout non deve
+            // restare a mescolarsi con quello della registrazione, e alla fine
+            // deve tornare.
+            park_layout(
+                parked,
+                pieces
+                    .iter()
+                    .map(|(_, placed, facing, id, name)| (placed, facing, id, name)),
+            );
+            for (entity, _, _, _, _) in pieces.iter() {
+                commands.entity(entity).despawn();
+            }
+
             spawn_layout(commands, &trace.layout);
             replay.start(trace);
             next_state.set(SimulationState::Replaying);

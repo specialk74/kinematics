@@ -17,6 +17,10 @@ pub const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
 /// Comando che in questo momento non risponde: si vede che c'e' e che non e'
 /// disponibile, invece di far credere a un tasto che non fa niente.
 pub const BUTTON_UNAVAILABLE: Color = Color::srgb(0.16, 0.16, 0.18);
+/// Comando pronto a essere premuto. Il grigio non bastava a distinguerlo da uno
+/// inerte, e sono proprio i comandi che cambiano disponibilita' a doversi
+/// distinguere a colpo d'occhio.
+pub const BUTTON_READY: Color = Color::srgb(0.16, 0.52, 0.24);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 const CAPTION_COLOR: Color = Color::srgb(0.55, 0.55, 0.62);
 /// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto
@@ -263,6 +267,23 @@ struct ToolButton(EditorTool);
 #[derive(Component)]
 struct Palette;
 
+/// Il riquadro con il nome del file e i suoi due comandi.
+#[derive(Component)]
+struct FileBox;
+
+/// La cornice attorno alla finestra: dice in che modo si e' senza doverlo
+/// leggere da nessuna parte. E' un nodo senza `Button` e senza `Interaction`,
+/// quindi non intercetta i clic: si limita a colorare il bordo.
+#[derive(Component)]
+struct ModeFrame;
+
+/// Spessore della cornice e i tre colori, tenui e trasparenti perche' devono
+/// dire in che modo si e' senza rubare l'occhio all'impianto.
+const FRAME_THICKNESS: f32 = 6.0;
+const FRAME_EDITING: Color = Color::srgba(0.85, 0.20, 0.20, 0.30);
+const FRAME_SIMULATING: Color = Color::srgba(0.20, 0.80, 0.30, 0.30);
+const FRAME_REPLAYING: Color = Color::srgba(0.25, 0.45, 0.95, 0.30);
+
 /// I due comandi sul file di layout, in fondo alla barra.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LayoutAction {
@@ -363,7 +384,10 @@ impl Plugin for EditorPlugin {
         app.init_resource::<SelectedTool>()
             .init_resource::<SaveNotice>()
             .init_resource::<DraggedPiece>()
-            .add_systems(Startup, (setup_palette, setup_ghost_material))
+            .add_systems(
+                Startup,
+                (setup_palette, setup_file_box, setup_ghost_material),
+            )
             .add_systems(
                 Update,
                 (
@@ -394,12 +418,12 @@ impl Plugin for EditorPlugin {
                     .run_if(not(in_state(SimulationState::Replaying))),
             )
             .init_state::<Mode>()
-            .add_systems(Startup, setup_mode_button)
-            .add_systems(Update, (switch_mode, show_mode));
+            .add_systems(Startup, (setup_mode_button, setup_mode_frame))
+            .add_systems(Update, (switch_mode, show_mode, refresh_mode_frame));
     }
 }
 
-fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
+fn setup_palette(mut commands: Commands) {
     commands
         .spawn((
             Node {
@@ -422,14 +446,35 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
                     children![button_label(mode.label())],
                 ));
             }
+        });
+}
 
-            // Spinge i comandi sul file in fondo, staccati dagli strumenti.
-            palette.spawn(Node {
-                flex_grow: 1.0,
+/// I comandi sul file stanno in un riquadro loro, staccato dalla barra degli
+/// strumenti: in simulazione la barra sparisce ma Carica serve ancora, perche'
+/// si puo' voler provare un altro impianto.
+fn setup_file_box(mut commands: Commands, layout_file: Res<LayoutFile>) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                width: Val::Px(PALETTE_WIDTH),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(8.0)),
+                row_gap: Val::Px(6.0),
                 ..default()
-            });
-
-            palette.spawn((
+            },
+            BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
+            // Sopra alla barra degli strumenti, che occupa tutta la colonna ed
+            // e' opaca. Senza dirlo, a decidere chi copre chi sarebbe l'ordine
+            // con cui i due sistemi di avvio si trovano a girare, che non e'
+            // garantito: e infatti il riquadro finiva sotto.
+            GlobalZIndex(1),
+            FileBox,
+        ))
+        .with_children(|box_| {
+            box_.spawn((
                 Text::new("File"),
                 TextFont {
                     font_size: 10.0,
@@ -437,7 +482,7 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
                 },
                 TextColor(CAPTION_COLOR),
             ));
-            palette.spawn((
+            box_.spawn((
                 Text::new(layout_file.display_name()),
                 TextFont {
                     font_size: 12.0,
@@ -451,9 +496,9 @@ fn setup_palette(mut commands: Commands, layout_file: Res<LayoutFile>) {
             ));
 
             for action in [LayoutAction::Save, LayoutAction::Load] {
-                palette.spawn((
+                box_.spawn((
                     button_node(),
-                    BackgroundColor(BUTTON_IDLE),
+                    BackgroundColor(BUTTON_READY),
                     LayoutButton(action),
                     children![(button_label(action.label()), LayoutButtonLabel(action))],
                 ));
@@ -805,12 +850,66 @@ fn pointed_piece(
 
 /// Il bottone che passa da un mestiere all'altro, e la barra degli strumenti che
 /// compare solo quando serve: in simulazione non si piazza niente.
+/// Un elemento si nasconde togliendolo dal calcolo dello spazio, non rendendolo
+/// invisibile: cosi' non lascia un buco dove stava.
+fn shown(visible: bool) -> Display {
+    if visible {
+        Display::Flex
+    } else {
+        Display::None
+    }
+}
+
+fn setup_mode_frame(mut commands: Commands) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            border: UiRect::all(Val::Px(FRAME_THICKNESS)),
+            ..default()
+        },
+        BorderColor::all(FRAME_EDITING),
+        // Senza questo la cornice si prenderebbe tutti i clic: un nodo che non
+        // dichiara niente, per l'interfaccia, blocca quello che ha sotto - e
+        // questa copre l'intera finestra.
+        Pickable::IGNORE,
+        ModeFrame,
+    ));
+}
+
+/// La cornice segue la modalita', e la riproduzione ha la precedenza: mentre
+/// scorre un file quello che si vede non e' ne' l'impianto che si sta
+/// costruendo ne' quello che si sta comandando.
+fn refresh_mode_frame(
+    mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
+    mut frames: Query<&mut BorderColor, With<ModeFrame>>,
+) {
+    if !mode.is_changed() && !state.is_changed() {
+        return;
+    }
+
+    let colour = match (state.get(), mode.get()) {
+        (SimulationState::Replaying, _) => FRAME_REPLAYING,
+        (_, Mode::Editing) => FRAME_EDITING,
+        (_, Mode::Simulating) => FRAME_SIMULATING,
+    };
+
+    for mut border in frames.iter_mut() {
+        *border = BorderColor::all(colour);
+    }
+}
+
 fn setup_mode_button(mut commands: Commands) {
     commands.spawn((
+        // Sempre verde: cambiare mestiere si puo' sempre.
         top_button(5),
-        BackgroundColor(BUTTON_IDLE),
+        BackgroundColor(BUTTON_READY),
         ModeButton,
-        children![(button_label(Mode::Editing.label()), ModeLabel)],
+        // Il bottone dice dove porta, non dove si e': e' quello che si sta per
+        // fare premendolo, come gia' fa il play/pausa.
+        children![(button_label(Mode::default().other().label()), ModeLabel)],
     ));
 }
 
@@ -830,21 +929,39 @@ fn switch_mode(
 
 fn show_mode(
     mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
     mut labels: Query<&mut Text, With<ModeLabel>>,
-    mut palette: Query<&mut Node, With<Palette>>,
+    mut palette: Query<&mut Node, (With<Palette>, Without<FileBox>, Without<LayoutButton>)>,
+    mut file_box: Query<&mut Node, (With<FileBox>, Without<LayoutButton>)>,
+    mut file_buttons: Query<(&LayoutButton, &mut Node)>,
     mut selected: ResMut<SelectedTool>,
 ) {
-    if !mode.is_changed() {
+    if !mode.is_changed() && !state.is_changed() {
         return;
     }
 
+    let replaying = *state.get() == SimulationState::Replaying;
+    let editing = *mode.get() == Mode::Editing && !replaying;
+
     for mut label in labels.iter_mut() {
-        label.0 = mode.get().label().to_string();
+        label.0 = mode.get().other().label().to_string();
     }
+    // Gli strumenti servono solo a costruire: in simulazione e durante una
+    // riproduzione non c'e' niente da piazzare.
     for mut node in palette.iter_mut() {
-        node.display = match mode.get() {
-            Mode::Editing => Display::Flex,
-            Mode::Simulating => Display::None,
+        node.display = shown(editing);
+    }
+    // Il riquadro del file sparisce solo durante una riproduzione: li' il
+    // layout arriva dal file della registrazione, non da quello scelto.
+    for mut node in file_box.iter_mut() {
+        node.display = shown(!replaying);
+    }
+    // Salvare ha senso solo dove si modifica l'impianto; caricarlo anche in
+    // simulazione, per provarne un altro.
+    for (button, mut node) in file_buttons.iter_mut() {
+        node.display = match button.0 {
+            LayoutAction::Save => shown(editing),
+            LayoutAction::Load => shown(!replaying),
         };
     }
 
@@ -1008,7 +1125,7 @@ fn handle_layout_buttons(
 
         match button.0 {
             LayoutAction::Save => {
-                let layout = layout::collect(&pieces);
+                let layout = layout::collect(pieces.iter());
 
                 let saved = match layout::save(&layout, &layout_file.path) {
                     Ok(()) => {

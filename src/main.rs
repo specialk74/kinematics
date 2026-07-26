@@ -113,13 +113,36 @@ fn main() {
     // La riproduzione ha bisogno della finestra, e infatti la riga di comando
     // rifiuta la coppia con hide_gui: qui non ci si arriva mai senza interfaccia.
     if let Some(path) = options.replay.clone() {
-        app.add_systems(
-            PostStartup,
+        let start_replay =
             move |mut commands: Commands,
                   mut replay: ResMut<Replay>,
+                  mut parked: ResMut<trace::ParkedLayout>,
+                  pieces: Query<(
+                Entity,
+                &layout::Placed,
+                &piece::Facing,
+                &name::PieceId,
+                &name::PieceName,
+            )>,
                   mut next_state: ResMut<NextState<SimulationState>>| {
-                trace::play_from_file(&mut commands, &mut replay, &mut next_state, &path);
-            },
+                trace::play_from_file(
+                    &mut commands,
+                    &mut replay,
+                    &mut parked,
+                    &pieces,
+                    &mut next_state,
+                    &path,
+                );
+            };
+
+        // Dopo che il layout e' nato, non prima: la riproduzione deve trovare la
+        // scena da mettere da parte e da sgombrare. Fra due sistemi dello stesso
+        // schedule l'ordine altrimenti non e' garantito, e la cosa si vedeva
+        // solo passando --layout e --replay insieme, che e' proprio il caso in
+        // cui conta.
+        app.add_systems(
+            PostStartup,
+            start_replay.after(layout::load_layout_at_startup),
         );
     }
 

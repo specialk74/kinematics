@@ -2,7 +2,8 @@ use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
 use crate::editor::{
-    DraggedPiece, EditorTool, SelectedTool, button_label, pointer_over_ui, top_button,
+    BUTTON_READY, BUTTON_UNAVAILABLE, DraggedPiece, EditorTool, SelectedTool, button_label,
+    pointer_over_ui, top_button,
 };
 
 /// Vista di partenza, quella a cui riporta il pulsante di reset.
@@ -33,7 +34,15 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Panning>()
             .add_systems(Startup, (spawn_camera, setup_reset_button))
-            .add_systems(Update, (zoom_with_ctrl_wheel, pan_view, reset_view));
+            .add_systems(
+                Update,
+                (
+                    zoom_with_ctrl_wheel,
+                    pan_view,
+                    reset_view,
+                    refresh_reset_button,
+                ),
+            );
     }
 }
 
@@ -44,10 +53,41 @@ fn spawn_camera(mut commands: Commands) {
 fn setup_reset_button(mut commands: Commands) {
     commands.spawn((
         top_button(1),
-        BackgroundColor(Color::srgb(0.20, 0.20, 0.24)),
+        BackgroundColor(BUTTON_UNAVAILABLE),
         ResetViewButton,
         children![button_label("Reset vista")],
     ));
+}
+
+/// Il bottone si accende solo quando ha qualcosa da riportare a posto: se la
+/// vista e' gia' quella di partenza, premerlo non farebbe niente, e un bottone
+/// che non fa niente non deve sembrare pronto.
+fn refresh_reset_button(
+    camera: Query<(&Projection, &Transform), With<Camera2d>>,
+    mut buttons: Query<&mut BackgroundColor, With<ResetViewButton>>,
+) {
+    let Ok((projection, transform)) = camera.single() else {
+        return;
+    };
+
+    let zoomed = match projection {
+        Projection::Orthographic(orthographic) => orthographic.scale != DEFAULT_ZOOM,
+        _ => false,
+    };
+    // Anche uno spostamento senza zoom conta: anche li' il reset fa qualcosa.
+    let moved = transform.translation.truncate() != Vec2::ZERO;
+
+    let colour = if zoomed || moved {
+        BUTTON_READY
+    } else {
+        BUTTON_UNAVAILABLE
+    };
+
+    for mut background in buttons.iter_mut() {
+        if background.0 != colour {
+            background.0 = colour;
+        }
+    }
 }
 
 /// Riporta la vista a com'era all'avvio: zoom di partenza e layout centrato.

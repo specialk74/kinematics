@@ -139,10 +139,11 @@ pub fn place_in_cell(
 
 /// Raccoglie in un `Layout` gli oggetti attualmente in scena. Lo usano il
 /// bottone Salva e la registrazione, che porta con se' l'impianto.
-pub fn collect(placed: &Query<(&Placed, &Facing, &PieceId, &PieceName)>) -> Layout {
+pub fn collect<'a>(
+    objects: impl Iterator<Item = (&'a Placed, &'a Facing, &'a PieceId, &'a PieceName)>,
+) -> Layout {
     Layout {
-        objects: placed
-            .iter()
+        objects: objects
             .map(|(placed, facing, id, name)| LayoutObject {
                 id: id.0,
                 tool: placed.tool,
@@ -217,7 +218,7 @@ pub fn spawn_layout(commands: &mut Commands, layout: &Layout) {
 /// Apre il layout passato sulla riga di comando. Un file che non si legge viene
 /// segnalato e basta: si parte a scena vuota, cosi' si puo' comunque costruirlo
 /// e salvarlo su quel nome.
-fn load_layout_at_startup(mut commands: Commands, layout_file: Res<LayoutFile>) {
+pub fn load_layout_at_startup(mut commands: Commands, layout_file: Res<LayoutFile>) {
     info!("file di layout: {}", layout_file.path);
 
     if !layout_file.load_at_startup {
