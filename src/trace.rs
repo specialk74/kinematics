@@ -70,7 +70,23 @@ impl TracedCarrier {
 /// istante, resta valido: e' una sequenza di cambi anche quella, solo ripetuta.
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct TraceFrame {
+    /// Il numero di questo istante, progressivo dall'inizio della
+    /// registrazione. La riproduzione va avanti per posizione nell'elenco, ma
+    /// il numero e' scritto lo stesso: e' quello che si legge sulla barra e che
+    /// serve a ritrovare nel file un punto visto a schermo.
+    #[serde(default)]
+    pub id: u32,
+    /// I carrier che si sono mossi, piu' quelli che compaiono adesso per la
+    /// prima volta. Chi e' fermo - una coda davanti a un gate, per esempio - non
+    /// compare: le sue coordinate sono quelle dell'istante prima, e riscriverle
+    /// venti volte al secondo era la ripetizione piu' grossa del file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carriers: Vec<TracedCarrier>,
+    /// Chi e' uscito dall'impianto in questo istante. Serve proprio perche' i
+    /// fermi non compaiono: senza, "non e' nell'elenco" vorrebbe dire insieme
+    /// "e' uscito" e "sta fermo", che sono cose opposte.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gone: Vec<u32>,
     /// Gli interruttori cambiati, ciascuno con l'id dell'oggetto a cui
     /// appartiene. L'id e' l'unica chiave che regge: la cella si sposta
     /// trascinando l'oggetto, e per giunta una cella puo' ospitarne tre
@@ -135,6 +151,8 @@ pub struct Recording {
     /// Di che tipo era ogni carrier nell'istante scritto prima: il termine di
     /// paragone per scrivere solo i cambi, come per gli interruttori.
     last_kinds: Vec<(u32, CarrierType)>,
+    /// Dove stava ognuno nell'istante scritto prima, per lo stesso motivo.
+    last_places: Vec<TracedCarrier>,
     /// Come erano messi gli interruttori nell'istante scritto prima: e' il
     /// termine di paragone che permette di scrivere solo i cambi.
     last: Vec<(u32, bool)>,
@@ -151,6 +169,42 @@ fn changes<T: Copy + PartialEq>(now: &[(u32, T)], before: &[(u32, T)]) -> Vec<(u
         })
         .copied()
         .collect()
+}
+
+/// Chi si e' mosso rispetto all'istante prima, piu' chi e' appena arrivato.
+fn moved(now: &[TracedCarrier], before: &[TracedCarrier]) -> Vec<TracedCarrier> {
+    now.iter()
+        .filter(|here| !before.iter().any(|was| was == *here))
+        .copied()
+        .collect()
+}
+
+/// Chi c'era e adesso non c'e' piu': uscito dall'impianto.
+fn left(now: &[TracedCarrier], before: &[TracedCarrier]) -> Vec<u32> {
+    before
+        .iter()
+        .filter(|was| !now.iter().any(|here| here.id() == was.id()))
+        .map(|was| was.id())
+        .collect()
+}
+
+/// Dove stavano tutti a un certo istante: si sommano gli spostamenti dall'inizio
+/// e si tolgono quelli usciti per strada. Serve dopo un salto con la barra, che
+/// scavalca gli istanti in mezzo.
+fn places_up_to(trace: &Trace, index: usize) -> Vec<TracedCarrier> {
+    let mut state: Vec<TracedCarrier> = Vec::new();
+
+    for frame in trace.frames.iter().take(index + 1) {
+        for here in &frame.carriers {
+            match state.iter_mut().find(|known| known.id() == here.id()) {
+                Some(known) => *known = *here,
+                None => state.push(*here),
+            }
+        }
+        state.retain(|known| !frame.gone.contains(&known.id()));
+    }
+
+    state
 }
 
 /// Applica dei cambi a uno stato: quello che c'era viene aggiornato, quello che
@@ -388,11 +442,17 @@ fn scrub(
         Visibility::Hidden
     };
 
-    let Some((total, fps)) = replay
-        .trace
-        .as_ref()
-        .map(|trace| (trace.frames.len(), trace.fps))
-    else {
+    let Some((total, fps, showing)) = replay.trace.as_ref().map(|trace| {
+        // Il numero e' quello scritto nell'istante, non la sua posizione
+        // nell'elenco: cosi' resta vero anche in un file tagliato a mano.
+        let showing = trace
+            .frames
+            .get(replay.frame)
+            .map(|frame| frame.id)
+            .unwrap_or_default();
+
+        (trace.frames.len(), trace.fps, showing)
+    }) else {
         return;
     };
     if total == 0 {
@@ -424,7 +484,7 @@ fn scrub(
     }
     for mut time in times.iter_mut() {
         time.0 = format!(
-            "{:.1} / {:.1} s",
+            "{:.1} / {:.1} s   #{showing}",
             replay.frame as f32 / fps,
             total as f32 / fps
         );
@@ -465,6 +525,7 @@ fn begin(recording: &mut Recording) {
     recording.frames.clear();
     recording.last = Vec::new();
     recording.last_kinds = Vec::new();
+    recording.last_places = Vec::new();
     info!("registrazione avviata");
 }
 
@@ -524,22 +585,27 @@ fn record_frames(
         .map(|(carrier, _)| (carrier.carrier_id, carrier.kind))
         .collect();
 
+    let places: Vec<TracedCarrier> = carriers
+        .iter()
+        .map(|(carrier, transform)| {
+            TracedCarrier(
+                carrier.carrier_id,
+                transform.translation.x,
+                transform.translation.y,
+            )
+        })
+        .collect();
+
     let frame = TraceFrame {
-        carriers: carriers
-            .iter()
-            .map(|(carrier, transform)| {
-                TracedCarrier(
-                    carrier.carrier_id,
-                    transform.translation.x,
-                    transform.translation.y,
-                )
-            })
-            .collect(),
+        id: recording.frames.len() as u32,
+        carriers: moved(&places, &recording.last_places),
+        gone: left(&places, &recording.last_places),
         switches: changes(&now, &recording.last),
         kinds: changes(&kinds_now, &recording.last_kinds),
     };
 
     recording.last_kinds = kinds_now;
+    recording.last_places = places;
     recording.last = now;
     recording.frames.push(frame);
 }
@@ -769,34 +835,69 @@ fn play_frames(
         .map(|(entity, carrier)| (carrier.carrier_id, entity))
         .collect();
 
-    for traced in &frame.carriers {
-        let at = traced.at();
+    // Scorrendo, l'istante porta solo chi si e' mosso e chi e' uscito: il resto
+    // della scena e' gia' al posto giusto da prima. Dopo un salto invece la
+    // scena non c'entra niente con il punto in cui si e' finiti, e va rifatta
+    // per intero sommando gli spostamenti dall'inizio.
+    let whole = (!scrolled)
+        .then(|| {
+            replay
+                .trace
+                .as_ref()
+                .map(|trace| places_up_to(trace, wanted))
+        })
+        .flatten();
+    let places = whole.as_deref().unwrap_or(&frame.carriers);
 
+    for traced in places {
         match live.remove(&traced.id()) {
             Some(entity) => {
                 if let Ok(mut transform) = positions.get_mut(entity) {
-                    transform.translation = at;
-                }
-                // Un carrier che nel frattempo si e' svuotato o riempito: il
-                // cambio sta nel file, e qui va rimesso in scena.
-                if let Some(kind) = kind_of(traced.id())
-                    && let Ok((_, mut carrier)) = carriers.get_mut(entity)
-                    && carrier.kind != kind
-                {
-                    carrier.kind = kind;
+                    transform.translation = traced.at();
                 }
             }
             None => {
                 let kind = kind_of(traced.id()).unwrap_or(CarrierType::Empty);
 
-                spawn_carrier(&mut commands, at, kind, traced.id(), Heading::Left);
+                spawn_carrier(&mut commands, traced.at(), kind, traced.id(), Heading::Left);
             }
         }
     }
 
-    // Chi non compare in questo istante era gia' uscito dall'impianto.
-    for entity in live.into_values() {
-        commands.entity(entity).despawn();
+    match whole.is_some() {
+        // Dopo un salto, chi non risulta in scena a quell'istante non c'entra
+        // piu' niente: era di un altro momento della registrazione.
+        true => {
+            for entity in live.into_values() {
+                commands.entity(entity).despawn();
+            }
+        }
+        // Scorrendo esce solo chi il file dice che e' uscito: gli altri che non
+        // compaiono sono semplicemente fermi.
+        false => {
+            for id in &frame.gone {
+                if let Some(entity) = live.get(id) {
+                    commands.entity(*entity).despawn();
+                }
+            }
+        }
+    }
+
+    // Un carrier che nel frattempo si e' svuotato o riempito. Si guarda l'elenco
+    // dei tipi e non quello delle posizioni: il cambio puo' benissimo capitare a
+    // un carrier fermo, che fra le posizioni non compare.
+    for (id, kind) in &kinds {
+        let found = carriers
+            .iter()
+            .find(|(_, carrier)| carrier.carrier_id == *id)
+            .map(|(entity, _)| entity);
+
+        if let Some(entity) = found
+            && let Ok((_, mut carrier)) = carriers.get_mut(entity)
+            && carrier.kind != *kind
+        {
+            carrier.kind = *kind;
+        }
     }
 
     // Gli interruttori tornano come erano: un gate chiuso a meta' registrazione
@@ -899,14 +1000,18 @@ mod tests {
             layout: Layout::default(),
             frames: vec![
                 TraceFrame {
+                    id: 0,
                     carriers: vec![TracedCarrier(1, 10.0, -20.0)],
+                    gone: vec![],
                     // Il gate (1) e l'antenna che gli sta sotto (2), accesi.
                     switches: vec![(1, true), (2, true)],
                     // Il carrier 1 entra in scena adesso, con la provetta.
                     kinds: vec![(1, CarrierType::WithTube)],
                 },
                 TraceFrame {
+                    id: 1,
                     carriers: vec![TracedCarrier(1, 5.0, -20.0)],
+                    gone: vec![],
                     // Nel secondo istante e' cambiato solo il gate: l'antenna
                     // e' rimasta com'era, e infatti non compare.
                     switches: vec![(1, false)],
@@ -960,6 +1065,7 @@ mod tests {
         let mut trace = sample();
         // Un terzo istante in cui il carrier prosegue senza cambiare.
         trace.frames.push(TraceFrame {
+            id: 2,
             carriers: vec![TracedCarrier(1, 0.0, -20.0)],
             ..Default::default()
         });
@@ -974,6 +1080,84 @@ mod tests {
             vec![(1, CarrierType::Empty)],
             "il tipo di allora e' la somma dei cambi fino a li'"
         );
+    }
+
+    /// Un carrier fermo non viene riscritto: chi si ferma davanti a un gate
+    /// sparisce dagli istanti finche' non riparte, e le sue coordinate restano
+    /// quelle dell'ultimo spostamento.
+    #[test]
+    fn a_carrier_standing_still_is_not_written_again() {
+        let before = [TracedCarrier(1, 10.0, 0.0), TracedCarrier(2, 40.0, 0.0)];
+        let now = [TracedCarrier(1, 10.0, 0.0), TracedCarrier(2, 35.0, 0.0)];
+
+        assert_eq!(
+            moved(&now, &before),
+            vec![TracedCarrier(2, 35.0, 0.0)],
+            "solo chi si e' spostato"
+        );
+        assert!(left(&now, &before).is_empty(), "nessuno e' uscito");
+    }
+
+    /// Chi esce dall'impianto va detto: senza, "non compare" vorrebbe dire
+    /// insieme "e' uscito" e "sta fermo".
+    #[test]
+    fn who_leaves_the_plant_is_named() {
+        let before = [TracedCarrier(1, 10.0, 0.0), TracedCarrier(2, 40.0, 0.0)];
+        let now = [TracedCarrier(2, 35.0, 0.0)];
+
+        assert_eq!(left(&now, &before), vec![1]);
+    }
+
+    /// Saltando con la barra la scena va rifatta: si sommano gli spostamenti
+    /// dall'inizio e si tolgono quelli usciti per strada.
+    #[test]
+    fn the_scene_at_an_instant_is_the_sum_of_the_moves() {
+        let trace = Trace {
+            fps: TRACE_FPS,
+            layout: Layout::default(),
+            frames: vec![
+                TraceFrame {
+                    id: 0,
+                    carriers: vec![TracedCarrier(1, 10.0, 0.0), TracedCarrier(2, 40.0, 0.0)],
+                    ..Default::default()
+                },
+                // Il primo si ferma - e infatti non compare - il secondo avanza.
+                TraceFrame {
+                    id: 1,
+                    carriers: vec![TracedCarrier(2, 35.0, 0.0)],
+                    ..Default::default()
+                },
+                // Il fermo riparte, il secondo esce dall'impianto.
+                TraceFrame {
+                    id: 2,
+                    carriers: vec![TracedCarrier(1, 5.0, 0.0)],
+                    gone: vec![2],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        assert_eq!(
+            places_up_to(&trace, 1),
+            vec![TracedCarrier(1, 10.0, 0.0), TracedCarrier(2, 35.0, 0.0)],
+            "il fermo sta dov'era"
+        );
+        assert_eq!(
+            places_up_to(&trace, 2),
+            vec![TracedCarrier(1, 5.0, 0.0)],
+            "chi e' uscito non torna in scena"
+        );
+    }
+
+    /// Ogni istante porta il proprio numero: e' quello che si legge sulla barra
+    /// durante la riproduzione, e serve a ritrovare nel file il punto che si sta
+    /// guardando a schermo.
+    #[test]
+    fn every_moment_carries_its_own_number() {
+        let reread = from_ron(&to_ron(&sample()).expect("scrittura")).expect("rilettura");
+
+        assert_eq!(reread.frames[0].id, 0);
+        assert_eq!(reread.frames[1].id, 1);
     }
 
     /// Una posizione e' una riga sola: id, x, y. Di righe cosi' un file ne
