@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, NextCarrierId};
-use crate::editor::{BUTTON_IDLE, button_label, top_button};
+use crate::editor::{BUTTON_IDLE, BUTTON_UNAVAILABLE, Mode, button_label, top_button};
 use crate::source::CarrierSource;
 use crate::trace::Replay;
 
@@ -45,11 +45,21 @@ pub struct SimulationControlsPlugin;
 
 impl Plugin for SimulationControlsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (setup_pause_button, setup_restart_button))
-            .add_systems(
-                Update,
-                (toggle_simulation, refresh_pause_button, restart_simulation),
-            );
+        app.add_systems(
+            Startup,
+            (
+                setup_pause_button,
+                setup_restart_button,
+                hold_still_in_editor,
+            ),
+        )
+        // Passando all'editor il tempo si ferma: si costruisce l'impianto, non
+        // lo si guarda funzionare.
+        .add_systems(OnEnter(Mode::Editing), hold_still_in_editor)
+        .add_systems(
+            Update,
+            (toggle_simulation, refresh_pause_button, restart_simulation),
+        );
     }
 }
 
@@ -99,12 +109,33 @@ fn restart_simulation(
     info!("simulazione riavviata");
 }
 
+/// Mette in pausa se si e' in editor. Vale anche all'avvio, che in editor ci
+/// nasce: un layout caricato da riga di comando resta immobile finche' non si
+/// passa in simulazione.
+fn hold_still_in_editor(
+    mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
+    mut next_state: ResMut<NextState<SimulationState>>,
+) {
+    // Una riproduzione in corso non la si tocca: quella ha il suo Stop.
+    if *mode.get() == Mode::Editing && *state.get() == SimulationState::Running {
+        next_state.set(SimulationState::Paused);
+    }
+}
+
 fn toggle_simulation(
     interactions: Query<&Interaction, (Changed<Interaction>, With<PauseButton>)>,
+    mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
     mut replay: ResMut<Replay>,
 ) {
+    // In editor il Play non fa niente: per far muovere i carrier si passa in
+    // simulazione. Una riproduzione invece si puo' fermare da qualunque modo.
+    if *mode.get() == Mode::Editing && *state.get() != SimulationState::Replaying {
+        return;
+    }
+
     for interaction in interactions.iter() {
         if *interaction != Interaction::Pressed {
             continue;
@@ -122,12 +153,25 @@ fn toggle_simulation(
 
 /// Il bottone mostra l'azione che compie, non lo stato in cui si trova.
 fn refresh_pause_button(
+    mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     replay: Res<Replay>,
     mut buttons: Query<&mut BackgroundColor, With<PauseButton>>,
     mut labels: Query<&mut Text, With<PauseLabel>>,
 ) {
-    if !state.is_changed() && !replay.is_changed() {
+    if !state.is_changed() && !replay.is_changed() && !mode.is_changed() {
+        return;
+    }
+
+    // In editor il bottone resta spento: dice che li' non c'e' niente da far
+    // partire, invece di far credere a un Play che non parte.
+    if *mode.get() == Mode::Editing && *state.get() != SimulationState::Replaying {
+        for mut background in buttons.iter_mut() {
+            background.0 = BUTTON_UNAVAILABLE;
+        }
+        for mut label in labels.iter_mut() {
+            label.0 = "Play".to_string();
+        }
         return;
     }
 

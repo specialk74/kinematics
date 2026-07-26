@@ -14,6 +14,9 @@ use crate::switch::Switch;
 pub const PALETTE_WIDTH: f32 = 120.0;
 
 pub const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
+/// Comando che in questo momento non risponde: si vede che c'e' e che non e'
+/// disponibile, invece di far credere a un tasto che non fa niente.
+pub const BUTTON_UNAVAILABLE: Color = Color::srgb(0.16, 0.16, 0.18);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 const CAPTION_COLOR: Color = Color::srgb(0.55, 0.55, 0.62);
 /// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto

@@ -9,7 +9,9 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::{Carrier, CarrierType, Heading, spawn_carrier};
-use crate::editor::{BUTTON_IDLE, PALETTE_WIDTH, button_label, top_button};
+use crate::editor::{
+    BUTTON_IDLE, BUTTON_UNAVAILABLE, Mode, PALETTE_WIDTH, button_label, top_button,
+};
 use crate::layout::{Layout, Placed, spawn_layout};
 use crate::name::{PieceId, PieceName};
 use crate::piece::Facing;
@@ -502,10 +504,12 @@ fn pressed<Button: Component>(
 
 fn toggle_recording(
     buttons: Query<&Interaction, (Changed<Interaction>, With<RecordButton>)>,
+    mode: Res<State<Mode>>,
+    state: Res<State<SimulationState>>,
     mut recording: ResMut<Recording>,
     placed: Query<(&Placed, &Facing, &PieceId, &PieceName)>,
 ) {
-    if !pressed(&buttons) {
+    if !pressed(&buttons) || !tape_available(&mode, &state) {
         return;
     }
 
@@ -528,6 +532,14 @@ fn begin(recording: &mut Recording) {
     recording.last_kinds = Vec::new();
     recording.last_places = Vec::new();
     info!("registrazione avviata");
+}
+
+/// Vero se i comandi del nastro rispondono. In editor non rispondono: non c'e'
+/// niente da registrare, e far partire una riproduzione spegnerebbe l'editor
+/// senza preavviso. Una riproduzione gia' in corso invece si deve poter fermare
+/// da qualunque modo, altrimenti si resta chiusi dentro.
+fn tape_available(mode: &State<Mode>, state: &State<SimulationState>) -> bool {
+    *mode.get() == Mode::Simulating || *state.get() == SimulationState::Replaying
 }
 
 /// Chiude la registrazione e la scrive su file, layout compreso.
@@ -621,6 +633,7 @@ fn save_on_exit(
 fn toggle_replay(
     mut commands: Commands,
     buttons: Query<&Interaction, (Changed<Interaction>, With<ReplayButton>)>,
+    mode: Res<State<Mode>>,
     mut replay: ResMut<Replay>,
     state: Res<State<SimulationState>>,
     mut next_state: ResMut<NextState<SimulationState>>,
@@ -628,7 +641,7 @@ fn toggle_replay(
     lists: Query<Entity, With<TraceList>>,
     carriers: Query<Entity, With<Carrier>>,
 ) {
-    if !pressed(&buttons) {
+    if !pressed(&buttons) || !tape_available(&mode, &state) {
         return;
     }
 
@@ -711,6 +724,7 @@ fn open_trace_list(commands: &mut Commands, traces: &[String]) {
 /// Un clic su una voce dell'elenco fa partire quella registrazione.
 fn choose_trace(
     mut commands: Commands,
+    mode: Res<State<Mode>>,
     entries: Query<(&Interaction, &TraceEntry), Changed<Interaction>>,
     lists: Query<Entity, With<TraceList>>,
     mut replay: ResMut<Replay>,
@@ -718,7 +732,12 @@ fn choose_trace(
     mut next_state: ResMut<NextState<SimulationState>>,
     carriers: Query<Entity, With<Carrier>>,
     placed: Query<(Entity, &Placed)>,
+    state: Res<State<SimulationState>>,
 ) {
+    if !tape_available(&mode, &state) {
+        return;
+    }
+
     let Some((_, entry)) = entries
         .iter()
         .find(|(interaction, _)| **interaction == Interaction::Pressed)
@@ -915,6 +934,7 @@ fn restore(states: &[(u32, Switch)], objects: &mut Query<(&PieceId, &mut Switch)
 fn refresh_buttons(
     time: Res<Time>,
     recording: Res<Recording>,
+    mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,
     mut notice: ResMut<ReplayNotice>,
     mut record_buttons: Query<&mut BackgroundColor, (With<RecordButton>, Without<ReplayButton>)>,
@@ -937,12 +957,13 @@ fn refresh_buttons(
     }
 
     let replaying = *state.get() == SimulationState::Replaying;
+    let available = tape_available(&mode, &state);
 
     for mut background in record_buttons.iter_mut() {
-        background.0 = if recording.active {
-            RECORDING_COLOR
-        } else {
-            BUTTON_IDLE
+        background.0 = match (available, recording.active) {
+            (false, _) => BUTTON_UNAVAILABLE,
+            (true, true) => RECORDING_COLOR,
+            (true, false) => BUTTON_IDLE,
         };
     }
     for mut label in record_labels.iter_mut() {
@@ -951,10 +972,11 @@ fn refresh_buttons(
 
     // Un messaggio in corso ha la precedenza: e' l'unico momento in cui il
     // bottone deve spiegare qualcosa invece di dire cosa fa.
-    let (colour, text) = match (pending, replaying) {
-        (Some(message), _) => (NOTICE_COLOR, message),
-        (None, true) => (REPLAYING_COLOR, "Stop"),
-        (None, false) => (BUTTON_IDLE, "Riproduci"),
+    let (colour, text) = match (pending, replaying, available) {
+        (Some(message), _, _) => (NOTICE_COLOR, message),
+        (None, true, _) => (REPLAYING_COLOR, "Stop"),
+        (None, false, false) => (BUTTON_UNAVAILABLE, "Riproduci"),
+        (None, false, true) => (BUTTON_IDLE, "Riproduci"),
     };
 
     for mut background in replay_buttons.iter_mut() {
