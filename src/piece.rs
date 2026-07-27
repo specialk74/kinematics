@@ -43,9 +43,6 @@ const ARROW_LENGTH: f32 = 20.0;
 const ARROW_HEAD: f32 = 8.0;
 const ARROW_HEAD_WIDTH: f32 = 11.0;
 const ARROW_STEM_WIDTH: f32 = 4.0;
-/// Raggio della freccia arcuata, quella dell'inversione.
-const ARC_RADIUS: f32 = 8.0;
-const ARC_SEGMENTS: usize = 12;
 /// Sopra al quadrato che la contiene.
 const ARROW_Z: f32 = 0.1;
 const ARROW_COLOR: Color = Color::WHITE;
@@ -156,8 +153,6 @@ pub enum Arrow {
     None,
     /// Dritta: il carrier prosegue di li'.
     Straight,
-    /// Arcuata: il carrier torna indietro girando.
-    Curved,
     /// Un quadrato nero: il carrier finisce li' e basta, da qualunque parte
     /// arrivi. Non e' un verso, quindi non e' una freccia.
     Stop,
@@ -186,7 +181,7 @@ pub struct PieceShapes {
     divert: Handle<Mesh>,
     atr: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
-    curved_arrow: Handle<Mesh>,
+    reverser: Handle<Mesh>,
     stop: Handle<Mesh>,
     arrow_material: Handle<ColorMaterial>,
     stop_material: Handle<ColorMaterial>,
@@ -231,16 +226,19 @@ fn guide_corridor() -> Mesh {
     triangles(points)
 }
 
-/// Spessore della traiettoria disegnata dentro il divert, e misure della punta
-/// che ne indica il verso. Senza la punta un divert girato in un verso e uno
+/// Spessore della traiettoria disegnata dentro un oggetto, e misure della punta
+/// che ne indica il verso. Senza la punta un oggetto girato in un verso e uno
 /// girato nel verso opposto si disegnerebbero uguali - un segmento ruotato di
 /// mezzo giro e' se stesso - e uno dei due non aggancia il flusso: si finiva
 /// per guardare un oggetto che sembrava a posto e non faceva niente.
-const DIVERT_PATH: f32 = 5.0;
-const DIVERT_HEAD: f32 = 15.0;
-const DIVERT_HEAD_WIDTH: f32 = 16.0;
-/// In quanti tratti si spezza l'arco: abbastanza da non vedere gli spigoli.
-const DIVERT_STEPS: usize = 14;
+///
+/// L'inversione non ne ha bisogno: li' il giro e' sempre lo stesso, e la figura
+/// disegna il corridoio invece della strada.
+const PATH_WIDTH: f32 = 5.0;
+const PATH_HEAD: f32 = 15.0;
+const PATH_HEAD_WIDTH: f32 = 16.0;
+/// In quanti tratti si spezza un arco: abbastanza da non vedere gli spigoli.
+const ARC_STEPS: usize = 14;
 
 /// Un segmento spesso fra due punti: serve alle diagonali, che un rettangolo
 /// dritto non sa fare.
@@ -253,6 +251,32 @@ fn thick_segment(points: &mut Vec<[f32; 3]>, from: Vec2, to: Vec2, width: f32) {
         [from + across, to - across, to + across],
     ] {
         points.extend(corner.map(|point| [point.x, point.y, 0.0]));
+    }
+}
+
+/// Un arco spesso attorno a un centro, dall'angolo `from` all'angolo `to`,
+/// spezzato in tratti dritti.
+fn thick_arc(points: &mut Vec<[f32; 3]>, centre: Vec2, radius: f32, arc: (f32, f32), width: f32) {
+    let (from, to) = arc;
+    let on_arc = |angle: f32| centre + Vec2::from_angle(angle) * radius;
+    let mut previous = on_arc(from);
+
+    for step in 1..=ARC_STEPS {
+        let next = on_arc(from + (to - from) * step as f32 / ARC_STEPS as f32);
+
+        thick_segment(points, previous, next, width);
+        previous = next;
+    }
+}
+
+/// La punta di una traiettoria: un triangolo appoggiato al collo e rivolto dove
+/// il carrier esce.
+fn path_head(points: &mut Vec<[f32; 3]>, neck: Vec2, tip: Vec2) {
+    let along = (tip - neck).normalize_or_zero();
+    let across = Vec2::new(-along.y, along.x) * PATH_HEAD_WIDTH / 2.0;
+
+    for point in [neck + across, neck - across, tip] {
+        points.push([point.x, point.y, 0.0]);
     }
 }
 
@@ -309,24 +333,68 @@ fn divert_glyph(from_the_main_lane: bool) -> Mesh {
 
     // Ci si ferma prima della fine: l'ultimo tratto e' la punta.
     let tip = on_arc(1.0);
-    let neck = on_arc(1.0 - DIVERT_HEAD / from.distance(to));
+    let neck = on_arc(1.0 - PATH_HEAD / from.distance(to));
     let mut previous = on_arc(0.0);
-    for step in 1..=DIVERT_STEPS {
-        let next = on_arc(step as f32 / DIVERT_STEPS as f32);
+    for step in 1..=ARC_STEPS {
+        let next = on_arc(step as f32 / ARC_STEPS as f32);
         if next.distance(tip) < neck.distance(tip) {
             break;
         }
 
-        thick_segment(&mut points, previous, next, DIVERT_PATH);
+        thick_segment(&mut points, previous, next, PATH_WIDTH);
         previous = next;
     }
-    thick_segment(&mut points, previous, neck, DIVERT_PATH);
+    thick_segment(&mut points, previous, neck, PATH_WIDTH);
 
     // La punta, sull'estremita' verso cui il carrier viene spostato.
-    let along = (tip - neck).normalize_or_zero();
-    let across = Vec2::new(-along.y, along.x) * DIVERT_HEAD_WIDTH / 2.0;
-    for point in [neck + across, neck - across, tip] {
-        points.push([point.x, point.y, 0.0]);
+    path_head(&mut points, neck, tip);
+
+    triangles(points)
+}
+
+/// Il raggio della curva d'inversione: mezza cella, cioe' la stessa misura che
+/// la cinematica usa in `reverser::TURN_RADIUS`. Si riscrive invece di
+/// importarla perche' il disegno non deve dipendere dal movimento; che le due
+/// coincidano lo tiene fermo il test dell'inversione, che pretende l'uscita
+/// esattamente una cella piu' in la'.
+const TURN_RADIUS: f32 = GRID_STEP / 2.0;
+
+/// L'inversione: il bordo della corsia che gira attorno al mezzo giro.
+///
+/// E' il tornante visto da fuori. Il centro e' quello vero della curva, mezza
+/// cella alla **sinistra** di chi arriva, dove lo mette `Reverser::turn`; il
+/// raggio e' una cella intera perche' il bordo corre mezza cella piu' in fuori
+/// della traiettoria. Comincia e finisce quindi sui confini delle due corsie -
+/// quella di andata e quella di ritorno - e le salda sopra la curva: senza, il
+/// corridoio finirebbe nel vuoto proprio dove il carrier gira.
+///
+/// Bordo interno non ce n'e', e non e' una dimenticanza: con la curva stretta
+/// mezza cella e la corsia larga una cella, il fianco interno si riduce al punto
+/// attorno a cui si gira.
+///
+/// La traiettoria dentro non e' disegnata, e nemmeno una punta: il mezzo giro e'
+/// sempre lo stesso - si gira a sinistra di chi arriva, comunque - quindi non
+/// c'e' nessuna scelta da raccontare. Resta il corridoio, che e' l'unica cosa da
+/// far vedere.
+fn reverser_glyph() -> Mesh {
+    let centre = Vec2::new(-TURN_RADIUS, 0.0);
+    let radius = TURN_RADIUS + GRID_STEP / 2.0;
+    let mut points = Vec::new();
+
+    thick_arc(&mut points, centre, radius, (0.0, PI), GUIDE_THICKNESS);
+
+    // I due montanti. L'arco finisce all'altezza del centro della cella, mentre
+    // i tratti di guida delle corsie cominciano al confine: fra i due resterebbe
+    // mezza cella di vuoto, e il raccordo che questa figura esiste per fare non
+    // ci sarebbe. Scendono fino al bordo della propria cella, cioe' esattamente
+    // dove comincia la guida della cella sotto.
+    for end in [centre + Vec2::X * radius, centre - Vec2::X * radius] {
+        thick_segment(
+            &mut points,
+            end,
+            Vec2::new(end.x, -GRID_STEP / 2.0),
+            GUIDE_THICKNESS,
+        );
     }
 
     triangles(points)
@@ -352,41 +420,6 @@ fn straight_arrow() -> Mesh {
         [head, neck, 0.0],
         [0.0, tip, 0.0],
     ])
-}
-
-/// Freccia arcuata: mezzo giro attorno al centro del quadrato, con la punta in
-/// fondo. Dice a colpo d'occhio che il carrier torna indietro girando.
-fn curved_arrow() -> Mesh {
-    let half = ARROW_STEM_WIDTH / 2.0;
-    let mut points = Vec::new();
-
-    // L'arco e' una striscia: due triangoli per ogni segmento.
-    for segment in 0..ARC_SEGMENTS {
-        let from = PI * segment as f32 / ARC_SEGMENTS as f32;
-        let to = PI * (segment + 1) as f32 / ARC_SEGMENTS as f32;
-        let (inner_from, outer_from) = (arc_point(from, -half), arc_point(from, half));
-        let (inner_to, outer_to) = (arc_point(to, -half), arc_point(to, half));
-
-        points.extend([inner_from, outer_from, outer_to]);
-        points.extend([inner_from, outer_to, inner_to]);
-    }
-
-    // La punta chiude l'arco, tangente all'ultimo segmento.
-    let end = arc_point(PI, 0.0);
-    let width = ARROW_HEAD_WIDTH / 2.0;
-    points.extend([
-        [end[0] - width, end[1], 0.0],
-        [end[0] + width, end[1], 0.0],
-        [end[0], end[1] - ARROW_HEAD, 0.0],
-    ]);
-
-    triangles(points)
-}
-
-fn arc_point(angle: f32, offset: f32) -> [f32; 3] {
-    let radius = ARC_RADIUS + offset;
-
-    [radius * angle.cos(), radius * angle.sin(), 0.0]
 }
 
 pub struct PiecePlugin;
@@ -418,7 +451,7 @@ fn setup_piece_shapes(
                 .translated_by(Vec3::Y * BAR_OFFSET),
         ),
         straight_arrow: meshes.add(straight_arrow()),
-        curved_arrow: meshes.add(curved_arrow()),
+        reverser: meshes.add(reverser_glyph()),
         stop: meshes.add(Rectangle::new(STOP_SIZE, STOP_SIZE)),
         arrow_material: materials.add(ARROW_COLOR),
         stop_material: materials.add(STOP_COLOR),
@@ -466,7 +499,9 @@ pub fn dressing(shapes: &PieceShapes, tool: Tool) -> (Handle<Mesh>, Arrow) {
         Tool::Atr => (shapes.atr.clone(), Arrow::None),
         Tool::Despawner => (shapes.square.clone(), Arrow::Stop),
         Tool::Turner => (shapes.square.clone(), Arrow::Straight),
-        Tool::Reverser => (shapes.square.clone(), Arrow::Curved),
+        // Il tornante lo disegna la figura, e il giro e' sempre quello: non c'e'
+        // un verso da aggiungere.
+        Tool::Reverser => (shapes.reverser.clone(), Arrow::None),
         Tool::Antenna => (shapes.circle.clone(), Arrow::None),
         Tool::TubeSensor | Tool::CarrierSensor => (shapes.bar.clone(), Arrow::None),
         Tool::Guide => (shapes.guide_line.clone(), Arrow::None),
@@ -492,11 +527,6 @@ pub fn dress_shape(
         Arrow::None => None,
         Arrow::Straight => Some((
             shapes.straight_arrow.clone(),
-            shapes.arrow_material.clone(),
-            0.0,
-        )),
-        Arrow::Curved => Some((
-            shapes.curved_arrow.clone(),
             shapes.arrow_material.clone(),
             0.0,
         )),
