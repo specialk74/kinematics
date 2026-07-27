@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 
-use crate::editor::Tool;
-use crate::piece::{self, PieceShapes};
+use crate::piece::{self, PieceShapes, Tool};
 
 /// Un tratto di guida: una linea sola, lunga quanto la cella. Non tocca il
 /// movimento e non ha niente da comandare - serve a far vedere dove i carrier

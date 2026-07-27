@@ -2,7 +2,7 @@ use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
-use crate::editor::Tool;
+use crate::piece::Tool;
 
 /// Il numero con cui l'oggetto e' identificato dal programma. E' lui, e non il
 /// nome ne' la cella, a comparire nelle registrazioni: il nome si puo' cambiare

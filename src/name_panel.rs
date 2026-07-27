@@ -1,11 +1,11 @@
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{self, BUTTON_IDLE, Mode, Tool};
+use crate::editor::{self, BUTTON_IDLE, Mode};
 use crate::grid;
 use crate::layout::Placed;
 use crate::name::{NameRow, Naming, PieceName};
-use crate::piece::{Facing, PIECE_SIZE};
+use crate::piece::{Facing, PIECE_SIZE, Tool};
 use crate::simulation::SimulationState;
 
 const PANEL_WIDTH: f32 = 190.0;

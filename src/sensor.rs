@@ -1,10 +1,9 @@
 use bevy::prelude::*;
 
 use crate::carrier::{COLLAR_RADIUS, Carrier, CarrierType, Heading};
-use crate::editor::Tool;
 use crate::engagement::Engaged;
 use crate::grid::GRID_STEP;
-use crate::piece::{self, PieceShapes};
+use crate::piece::{self, PieceShapes, Tool};
 use crate::switch::{Look, Switch};
 
 /// Che cosa guarda il sensore. E' l'unica differenza fra i due: la zona che

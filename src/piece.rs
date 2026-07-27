@@ -6,7 +6,6 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::carrier::{CARRIER_RADIUS, Heading};
-use crate::editor::Tool;
 use crate::grid::GRID_STEP;
 
 pub const PIECE_SIZE: f32 = 30.0;
@@ -53,6 +52,101 @@ const ARROW_COLOR: Color = Color::WHITE;
 /// Il quadrato nero del despawn.
 const STOP_SIZE: f32 = 14.0;
 const STOP_COLOR: Color = Color::BLACK;
+
+/// Gli oggetti che si possono piazzare nella scena. E' anche il vocabolario del
+/// file di layout, quindi rinominare una variante invalida i file gia' salvati.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Tool {
+    CarrierSource,
+    Gate,
+    Divert,
+    Atr,
+    Despawner,
+    /// Svolta a destra rispetto alla marcia del carrier. Il nome serializzato
+    /// resta quello di prima per non invalidare i layout gia' salvati.
+    #[serde(alias = "Riser")]
+    Turner,
+    Reverser,
+    /// Lettore sotto la linea. Non tocca il flusso: guarda e basta.
+    Antenna,
+    /// Fotocellula su una parete della cella: vede passare le provette.
+    TubeSensor,
+    /// La stessa cosa, ma conta qualunque carrier.
+    CarrierSensor,
+    /// Un tratto di guida: disegno e basta, non tocca il flusso.
+    Guide,
+}
+
+impl Tool {
+    pub fn label(self) -> &'static str {
+        match self {
+            Tool::CarrierSource => "Sorgente",
+            Tool::Gate => "Gate",
+            Tool::Divert => "Divert",
+            Tool::Atr => "ATR",
+            Tool::Despawner => "Despawn",
+            Tool::Turner => "Svolta",
+            Tool::Reverser => "Inversione",
+            Tool::Antenna => "Antenna",
+            Tool::TubeSensor => "Sens. tubo",
+            Tool::CarrierSensor => "Sens. carrier",
+            Tool::Guide => "Guida",
+        }
+    }
+
+    /// Vero se per questo oggetto "attivo" vuol dire forzare il proprio segnale
+    /// invece di comandare un'azione: sensori e antenna. Serve a saperlo prima
+    /// ancora che l'oggetto esista, quando gli si da' lo stato di partenza.
+    pub fn forces_signal(self) -> bool {
+        matches!(self, Tool::Antenna | Tool::TubeSensor | Tool::CarrierSensor)
+    }
+
+    pub fn layer(self) -> Layer {
+        match self {
+            Tool::Guide => Layer::Rail,
+            Tool::Antenna => Layer::Under,
+            Tool::TubeSensor | Tool::CarrierSensor => Layer::Side,
+            _ => Layer::Track,
+        }
+    }
+
+    /// Vero se l'oggetto e' solo disegno: niente stato da comandare, niente
+    /// nome da dire a mqtt, e quindi niente da mostrare nell'elenco dei nomi
+    /// ne' da scrivere nelle registrazioni. Un impianto ne contiene molti.
+    pub fn is_passive(self) -> bool {
+        self == Tool::Guide
+    }
+}
+
+/// Su che piano vive un oggetto. Serve perche' l'antenna sta sotto la linea:
+/// non contende la cella agli altri, e una cella puo' benissimo avere un gate
+/// con un'antenna sotto. Due oggetti dello stesso piano invece si escludono,
+/// come e' sempre stato.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layer {
+    /// Sulla linea: sorgenti, gate, deviatori, uscite.
+    Track,
+    /// Su una parete della cella: i sensori. Uno solo per cella, ma convive con
+    /// l'oggetto di linea, perche' sta su un lato che quello lascia libero.
+    Side,
+    /// Sotto la linea: ci passano sopra sia i carrier sia gli oggetti.
+    Under,
+    /// Il fondo: i tratti di guida, che stanno sotto a tutto il resto.
+    Rail,
+}
+
+impl Layer {
+    /// Quota a cui nasce l'oggetto. I carrier viaggiano a zero, quindi il piano
+    /// di sotto deve stare in negativo per finire davvero sotto di loro.
+    pub fn z(self) -> f32 {
+        match self {
+            Layer::Track => 1.0,
+            Layer::Side => 0.9,
+            Layer::Under => -1.0,
+            Layer::Rail => -2.0,
+        }
+    }
+}
 
 /// Che freccia ci va dentro. Non tutti gli oggetti ne hanno una: il gate blocca
 /// e basta, in qualunque verso lo si giri.
@@ -469,6 +563,14 @@ mod tests {
 
         assert!(covers(Tool::Atr, Facing::default(), Vec2::ZERO, inside));
         assert!(!covers(Tool::Atr, Facing::default(), Vec2::ZERO, outside));
+    }
+
+    /// L'antenna deve finire sotto ai carrier, che viaggiano a quota zero, e
+    /// sotto agli oggetti di linea.
+    #[test]
+    fn the_antenna_lies_below_carriers_and_objects() {
+        assert!(Tool::Antenna.layer().z() < 0.0);
+        assert!(Tool::Antenna.layer().z() < Tool::Gate.layer().z());
     }
 
     /// L'antenna non e' al centro della cella ma spostata verso il lato, e si

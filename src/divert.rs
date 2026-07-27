@@ -1,9 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, CarrierType, Heading};
-use crate::editor::Tool;
 use crate::engagement::Engaged;
-use crate::piece::{self, PieceShapes};
+use crate::piece::{self, PieceShapes, Tool};
 use crate::switch::{Look, Switch};
 
 /// Dislivello fra la corsia principale e quella deviata.

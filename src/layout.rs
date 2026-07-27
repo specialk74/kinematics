@@ -7,9 +7,8 @@ use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::divert::DivertKind;
-use crate::editor::Tool;
 use crate::name::{Identity, PieceId, PieceName};
-use crate::piece::Facing;
+use crate::piece::{Facing, Tool};
 use crate::switch::Switch;
 
 /// File usato quando non se ne passa uno sulla riga di comando. Il percorso e'

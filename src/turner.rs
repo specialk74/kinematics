@@ -1,9 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
-use crate::editor::Tool;
 use crate::engagement::{Engaged, in_the_same_cell};
-use crate::piece::{self, PieceShapes};
+use crate::piece::{self, PieceShapes, Tool};
 use crate::switch::{Look, Switch};
 
 /// Fa svoltare il carrier a destra rispetto alla sua marcia: chi va a sinistra

@@ -1,8 +1,7 @@
 use bevy::prelude::*;
 
 use crate::carrier::{CARRIER_SIZE, Carrier, NextCarrierId, spawn_random_carrier};
-use crate::editor::Tool;
-use crate::piece::{self, Facing, PieceShapes};
+use crate::piece::{self, Facing, PieceShapes, Tool};
 use crate::simulation::SimulationState;
 use crate::switch::{Look, Switch};
 

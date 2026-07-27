@@ -1,9 +1,8 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, Heading};
-use crate::editor::Tool;
 use crate::engagement::Engaged;
-use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes};
+use crate::piece::{self, ANTENNA_OFFSET, ANTENNA_RADIUS, PieceShapes, Tool};
 use crate::switch::{Look, Switch};
 
 /// Antenna di lettura: sta sotto la linea e guarda passare i carrier sopra di

@@ -1,8 +1,7 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Blocker, Heading};
-use crate::editor::Tool;
-use crate::piece::{self, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes};
+use crate::piece::{self, BAR_LENGTH, BAR_OFFSET, BAR_THICKNESS, PieceShapes, Tool};
 use crate::switch::{Look, Switch};
 
 /// Sbarra piazzabile sul percorso: quando e' attiva i carrier si fermano davanti,
