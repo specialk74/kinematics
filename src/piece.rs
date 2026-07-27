@@ -172,19 +172,34 @@ fn thick_segment(points: &mut Vec<[f32; 3]>, from: Vec2, to: Vec2, width: f32) {
 /// Sono due oggetti che fanno il contrario l'uno dell'altro, e il disegno lo
 /// dice invece di lasciarlo capire dal colore.
 ///
-/// Non c'e' nessun bordo di corsia: quelli li disegnano i pezzi di guida, che
-/// l'utente mette dove servono. Provandoci, il bordo finiva di traverso alla
-/// corsia in due orientamenti su quattro - un oggetto serve due flussi diversi
-/// a seconda di come lo si gira, e una riga sola non puo' essere giusta per
-/// tutti e due. La diagonale invece lo e': girata segue sempre lo spostamento.
+/// I bordi della corsia li disegnano i pezzi di guida, che l'utente mette dove
+/// servono; l'unico che si disegna qui e' quello che la guida non puo' mettere,
+/// cioe' il fianco della cella occupata dal divert. E' un bordo solo, e sul lato
+/// dove il carrier non passa: girato segue lo spostamento come la diagonale.
 ///
 /// Divert e ATR condividono la figura perche' condividono il movimento: a
 /// distinguerli sono il colore e il verso in cui li si gira.
-fn divert_glyph(in_the_next_lane: bool) -> Mesh {
+fn divert_glyph(from_the_main_lane: bool) -> Mesh {
     let half = GRID_STEP / 2.0;
     // Il divert disegna una corsia piu' in la', l'ATR in casa propria.
-    let lane = if in_the_next_lane { GRID_STEP } else { 0.0 };
+    let lane = if from_the_main_lane { GRID_STEP } else { 0.0 };
     let mut points = Vec::new();
+
+    // Il fianco della corsia, che il divert si porta dietro. La sua cella sta in
+    // mezzo alla corsia principale e la occupa lui: li' un pezzo di guida non ci
+    // sta, e il bordo del corridoio resterebbe interrotto proprio dove il flusso
+    // deve poter tirare dritto. Va sul lato opposto alla deviazione, perche'
+    // dall'altra parte l'apertura serve davvero: e' di li' che si esce.
+    // L'ATR non ne ha bisogno - vive nella corsia secondaria, dove i bordi sono
+    // quelli che l'utente disegna attorno al ramo.
+    if from_the_main_lane {
+        thick_segment(
+            &mut points,
+            Vec2::new(-half, -half),
+            Vec2::new(half, -half),
+            GUIDE_THICKNESS,
+        );
+    }
 
     let from = Vec2::new(half, -half + lane);
     let to = Vec2::new(-half, half + lane);
