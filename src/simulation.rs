@@ -7,8 +7,43 @@ use crate::ui::{BUTTON_READY, BUTTON_UNAVAILABLE, button_label, top_button};
 
 /// Mentre gira, il bottone dice "Pausa" ed e' premibile: verde come gli altri
 /// comandi disponibili. In pausa resta l'arancio, che segnala uno stato in
-/// corso invece della semplice disponibilita'.
+/// corso invece della semplice disponibilita'. Lo usa anche la velocita', per
+/// dire che l'orologio non e' piu' quello vero.
 const PAUSED_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
+
+/// Le andature fra cui gira il bottone. Non e' una scala continua: servono
+/// pochi passi riconoscibili, non una manopola.
+const SPEEDS: [f32; 4] = [1.0, 2.0, 4.0, 8.0];
+
+/// Piu' veloce di cosi' non si va, e non e' un limite di comodo. In un frame il
+/// carrier percorre `BELT_SPEED * delta * velocita'`: a sedici volte sono 27 px,
+/// ancora meno della fascia in cui un gate lo ferma (38) e della finestra in cui
+/// un deviatore lo aggancia (48). Piu' su comincerebbe a scavalcare gli oggetti
+/// invece di incontrarli, e un impianto che si guarda al doppio della velocita'
+/// non varrebbe un carrier che attraversa una sbarra chiusa.
+pub const MAX_SPEED: f32 = 16.0;
+
+/// Quanto tempo simulato puo' passare in un frame solo. Bevy ne ha gia' un
+/// limite (un quarto di secondo) che serve a non far esplodere il mondo dopo
+/// una pausa del sistema operativo; qui lo si divide per l'andatura, cosi' il
+/// **passo** piu' lungo possibile resta lo stesso a qualunque velocita'. Senza,
+/// accelerare moltiplicherebbe anche i salti, che e' proprio cio' che il limite
+/// esisteva per evitare.
+const LONGEST_STEP: f32 = 0.25;
+
+/// Cambia l'andatura dell'orologio simulato. Tutto qui dentro si muove su
+/// `Res<Time>` - carrier, sorgenti, registrazione, riproduzione - quindi si
+/// accelera in un punto solo, e niente ha bisogno di sapere che sta correndo.
+pub fn set_speed(clock: &mut Time<Virtual>, speed: f32) {
+    let wanted = speed;
+    let speed = speed.clamp(1.0, MAX_SPEED);
+    if speed != wanted {
+        warn!("velocita' {wanted}x riportata a {speed}x");
+    }
+
+    clock.set_relative_speed(speed);
+    clock.set_max_delta(std::time::Duration::from_secs_f32(LONGEST_STEP / speed));
+}
 
 /// In che modalita' e' il programma. Sono due mestieri diversi con gli stessi
 /// due tasti del mouse: nell'editor si costruisce l'impianto, in simulazione lo
@@ -86,6 +121,7 @@ impl Plugin for SimulationControlsPlugin {
             (
                 setup_pause_button,
                 setup_restart_button,
+                setup_speed_button,
                 hold_still_in_editor,
             ),
         )
@@ -104,6 +140,8 @@ impl Plugin for SimulationControlsPlugin {
                 refresh_pause_button,
                 restart_simulation,
                 refresh_restart_button,
+                change_speed,
+                refresh_speed_button,
             ),
         );
     }
@@ -125,6 +163,80 @@ fn setup_restart_button(mut commands: Commands) {
         RestartButton,
         children![button_label("Riavvia")],
     ));
+}
+
+#[derive(Component)]
+struct SpeedButton;
+
+#[derive(Component)]
+struct SpeedLabel;
+
+fn setup_speed_button(mut commands: Commands) {
+    commands.spawn((
+        top_button(6),
+        BackgroundColor(BUTTON_READY),
+        SpeedButton,
+        children![(button_label("1x"), SpeedLabel)],
+    ));
+}
+
+/// Il bottone gira sulle andature, e da quella piu' alta torna al passo vero.
+/// Non si ferma sull'ultima: chi ha accelerato per arrivare in fondo a un giro
+/// vuole quasi sempre tornare a guardare a velocita' normale.
+fn change_speed(
+    buttons: Query<&Interaction, (Changed<Interaction>, With<SpeedButton>)>,
+    mut clock: ResMut<Time<Virtual>>,
+) {
+    let pressed = buttons
+        .iter()
+        .any(|interaction| *interaction == Interaction::Pressed);
+
+    if !pressed {
+        return;
+    }
+
+    let now = clock.relative_speed();
+    let next = SPEEDS
+        .iter()
+        .find(|speed| **speed > now + 0.01)
+        .copied()
+        .unwrap_or(SPEEDS[0]);
+
+    set_speed(&mut clock, next);
+    info!("velocita' della simulazione: {next}x");
+}
+
+/// L'andatura si legge sul bottone, e il colore dice se l'orologio e' quello
+/// vero: accelerare e' uno stato in corso, come la pausa.
+fn refresh_speed_button(
+    clock: Res<Time<Virtual>>,
+    mut buttons: Query<&mut BackgroundColor, With<SpeedButton>>,
+    mut labels: Query<&mut Text, With<SpeedLabel>>,
+    // Quella gia' scritta sul bottone. Non si puo' guardare `is_changed`:
+    // l'orologio cambia a ogni frame per mestiere, e si riscriverebbe
+    // un'etichetta identica sessanta volte al secondo. Parte da zero, che non e'
+    // un'andatura possibile, quindi la prima volta scrive comunque - ed e' cosi'
+    // che il bottone nasce gia' giusto quando la velocita' arriva da `--speed`.
+    mut shown: Local<f32>,
+) {
+    let speed = clock.relative_speed();
+    if *shown == speed {
+        return;
+    }
+    *shown = speed;
+
+    let colour = if speed > 1.0 {
+        PAUSED_COLOR
+    } else {
+        BUTTON_READY
+    };
+
+    for mut background in buttons.iter_mut() {
+        background.0 = colour;
+    }
+    for mut label in labels.iter_mut() {
+        label.0 = format!("{speed}x");
+    }
 }
 
 /// Se la simulazione e' stata avviata almeno una volta da quando e' stata
@@ -297,5 +409,44 @@ fn refresh_pause_button(
     }
     for mut label in labels.iter_mut() {
         label.0 = text.to_string();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Accelerare non deve allungare il singolo passo: il limite di Bevy sul
+    /// tempo che puo' passare in un frame viene diviso per l'andatura, cosi' il
+    /// tratto piu' lungo che un carrier percorre in un colpo resta quello di
+    /// sempre. Senza, andare veloci vorrebbe dire anche saltare piu' lontano, e
+    /// un carrier potrebbe scavalcare la sbarra che dovrebbe fermarlo.
+    #[test]
+    fn going_faster_never_makes_a_single_step_longer() {
+        let mut clock = Time::<Virtual>::default();
+
+        for speed in SPEEDS {
+            set_speed(&mut clock, speed);
+
+            assert_eq!(clock.relative_speed(), speed);
+            assert!(
+                (clock.max_delta().as_secs_f32() * speed - LONGEST_STEP).abs() < 0.001,
+                "a {speed}x il passo massimo e' cambiato"
+            );
+        }
+    }
+
+    /// Un'andatura assurda non viene rifiutata ma riportata nei limiti: chi
+    /// scrive un numero enorme vuole "il piu' veloce possibile", e fermarsi con
+    /// un errore non lo aiuterebbe. Sotto, il tempo non va all'indietro.
+    #[test]
+    fn an_absurd_pace_is_brought_back_within_the_limits() {
+        let mut clock = Time::<Virtual>::default();
+
+        set_speed(&mut clock, 1000.0);
+        assert_eq!(clock.relative_speed(), MAX_SPEED);
+
+        set_speed(&mut clock, -3.0);
+        assert_eq!(clock.relative_speed(), 1.0);
     }
 }

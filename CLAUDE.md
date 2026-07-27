@@ -13,6 +13,7 @@ cargo run -- --layout layout.ron          # con finestra
 cargo run -- --hide_gui --layout x.ron    # senza finestra, fino a Ctrl+C
 cargo run -- --layout x.ron --record      # registra da subito (anche headless)
 cargo run -- --replay registrazione-*.ron # riproduce; vietato con --hide_gui
+cargo run -- --hide_gui --speed 8          # tempo simulato 8 volte piu' veloce
 
 cargo test                                 # ~105 test, girano in millisecondi
 cargo test divert                          # per sottostringa (modulo o nome del test)
@@ -49,6 +50,13 @@ Due assi indipendenti, entrambi `States` di Bevy e **entrambi in `simulation.rs`
 - `Mode` — `Editing` / `Simulating`: due mestieri con gli stessi tasti del mouse. Lo registra
   pero' `EditorPlugin`, perche' senza finestra non c'e' niente da costruire.
 - `SimulationState` — `Running` / `Paused` / `Replaying`.
+
+L'andatura invece non e' uno stato: sta sull'orologio virtuale di Bevy
+(`simulation::set_speed`), che e' quello da cui `Res<Time>` prende il passo. Accelerarlo
+accelera insieme carrier, sorgenti, registrazione e riproduzione, e nessuno di loro deve
+saperlo. Il tetto (`MAX_SPEED`) non e' di comodo: oltre, il passo di un frame diventa piu'
+lungo delle figure che il carrier deve incontrare. I messaggi a schermo usano invece
+`Time<Real>`: durano quanto deve durare per chi legge.
 
 I sistemi si agganciano con `run_if(in_state(...))`. Passando in editor il tempo si ferma e
 il nastro si svuota; durante una riproduzione le posizioni arrivano dal file, quindi la

@@ -108,6 +108,15 @@ fn main() {
         .add_plugins((NamePlugin, NamePanelPlugin, GuideVisualsPlugin));
     }
 
+    // L'andatura si imposta sull'orologio virtuale, che c'e' in tutti e due i
+    // casi: e' quello da cui `Res<Time>` prende il passo, quindi accelerarlo
+    // accelera insieme carrier, sorgenti e registrazione senza che nessuno di
+    // loro debba saperlo.
+    simulation::set_speed(
+        &mut app.world_mut().resource_mut::<Time<Virtual>>(),
+        options.speed,
+    );
+
     // Registrazione e riproduzione partono a scena gia' costruita: il layout
     // nasce in PostStartup, e una riproduzione porta con se' il proprio.
     if options.record {

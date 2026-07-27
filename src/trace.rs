@@ -822,7 +822,9 @@ fn restore(states: &[(u32, Switch)], objects: &mut Query<(&PieceId, &mut Switch)
 }
 
 fn refresh_buttons(
-    time: Res<Time>,
+    // Come per l'avviso del salvataggio: il messaggio sul bottone dura quanto
+    // deve durare per chi legge, non quanto dura per i carrier.
+    time: Res<Time<Real>>,
     recording: Res<Recording>,
     mode: Res<State<Mode>>,
     state: Res<State<SimulationState>>,

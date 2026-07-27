@@ -4,7 +4,9 @@ use crate::layout::LayoutFile;
 
 /// Come e' stato lanciato il programma. Le opzioni si riconoscono dal nome, non
 /// dalla posizione: l'ordine in cui si scrivono non conta.
-#[derive(Parser, Debug, PartialEq, Eq)]
+// Niente `Eq`: l'andatura e' un numero con la virgola, e fra due di quelli
+// l'uguaglianza esatta non e' una relazione su cui si possa contare.
+#[derive(Parser, Debug, PartialEq)]
 #[command(version, about = "Simulatore di flusso carrier")]
 pub struct Options {
     /// File di layout da aprire all'avvio. Diventa anche il bersaglio dei
@@ -29,6 +31,15 @@ pub struct Options {
     // `--hide-gui`, che teniamo come alias perche' e' la forma che uno si aspetta.
     #[arg(long = "hide_gui", alias = "hide-gui")]
     pub hide_gui: bool,
+
+    /// Quante volte piu' veloce del tempo vero deve andare la simulazione.
+    /// Con la finestra si cambia anche dal bottone; senza, questo e' l'unico
+    /// modo - ed e' li' che serve di piu', perche' un impianto lungo si fa
+    /// percorrere tutto in un minuto invece che in dieci.
+    // Il valore viene comunque riportato entro il massimo: oltre, il carrier
+    // farebbe passi piu' lunghi degli oggetti che deve incontrare.
+    #[arg(long, value_name = "VOLTE", default_value_t = 1.0)]
+    pub speed: f32,
 }
 
 impl Options {
@@ -44,6 +55,16 @@ mod tests {
 
     fn parse(args: &[&str]) -> Options {
         Options::parse_from(std::iter::once("chapter1").chain(args.iter().copied()))
+    }
+
+    /// L'andatura si puo' chiedere dalla riga di comando, e di norma e' quella
+    /// vera. Un valore assurdo non viene rifiutato ma riportato entro il
+    /// massimo: chi scrive `--speed 100` vuole "il piu' veloce possibile", e
+    /// fermarsi con un errore non lo aiuterebbe.
+    #[test]
+    fn the_pace_can_be_asked_for_from_the_command_line() {
+        assert_eq!(parse(&["--speed", "8"]).speed, 8.0);
+        assert_eq!(parse(&[]).speed, 1.0, "di norma si va al tempo vero");
     }
 
     #[test]

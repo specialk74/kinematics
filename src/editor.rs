@@ -839,7 +839,9 @@ fn show_mode(
 /// Mostra sul bottone Salva com'e' andata, e dopo qualche secondo lo rimette
 /// com'era. E' il riscontro che prima mancava: il log lo vede solo chi lo guarda.
 fn show_save_outcome(
-    time: Res<Time>,
+    // L'orologio vero, non quello della simulazione: un messaggio a schermo
+    // dura due secondi di quelli dell'utente anche mentre l'impianto corre.
+    time: Res<Time<Real>>,
     mut notice: ResMut<SaveNotice>,
     mut buttons: Query<(&LayoutButton, &mut BackgroundColor)>,
     mut labels: Query<(&LayoutButtonLabel, &mut Text)>,
