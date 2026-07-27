@@ -7,19 +7,13 @@ use crate::grid;
 use crate::layout::{self, LayoutFile, Placed, place_in_cell, spawn_layout};
 use crate::name::{self, Identity, PieceId, PieceName};
 use crate::piece::{self, Facing, Layer, PieceShapes, Tool};
-use crate::simulation::SimulationState;
+use crate::simulation::{Mode, SimulationState};
 use crate::switch::Switch;
+use crate::ui::{
+    BUTTON_IDLE, BUTTON_READY, PALETTE_WIDTH, button_label, button_node, pointer_over_ui,
+    top_button,
+};
 
-pub const PALETTE_WIDTH: f32 = 120.0;
-
-pub const BUTTON_IDLE: Color = Color::srgb(0.20, 0.20, 0.24);
-/// Comando che in questo momento non risponde: si vede che c'e' e che non e'
-/// disponibile, invece di far credere a un tasto che non fa niente.
-pub const BUTTON_UNAVAILABLE: Color = Color::srgb(0.16, 0.16, 0.18);
-/// Comando pronto a essere premuto. Il grigio non bastava a distinguerlo da uno
-/// inerte, e sono proprio i comandi che cambiano disponibilita' a doversi
-/// distinguere a colpo d'occhio.
-pub const BUTTON_READY: Color = Color::srgb(0.16, 0.52, 0.24);
 const BUTTON_SELECTED: Color = Color::srgb(0.25, 0.45, 0.80);
 const CAPTION_COLOR: Color = Color::srgb(0.55, 0.55, 0.62);
 /// Davanti a tutto: l'anteprima deve restare leggibile anche sopra un oggetto
@@ -142,33 +136,6 @@ const MODES: [EditorTool; 14] = [
     EditorTool::GateWithAntenna,
 ];
 
-/// In che modalita' e' il programma. Sono due mestieri diversi con gli stessi
-/// due tasti del mouse: nell'editor si costruisce l'impianto, in simulazione lo
-/// si comanda. Tenerli separati e' quello che libera il tasto destro, altrimenti
-/// occupato dalla rotazione.
-#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-pub enum Mode {
-    #[default]
-    Editing,
-    Simulating,
-}
-
-impl Mode {
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Editing => "Editor",
-            Mode::Simulating => "Simulazione",
-        }
-    }
-
-    fn other(self) -> Self {
-        match self {
-            Mode::Editing => Mode::Simulating,
-            Mode::Simulating => Mode::Editing,
-        }
-    }
-}
-
 #[derive(Component)]
 struct ModeButton;
 
@@ -261,15 +228,6 @@ struct Ghost(Tool);
 
 #[derive(Resource)]
 struct GhostMaterial(Handle<ColorMaterial>);
-
-/// Vero se il puntatore e' su un elemento dell'interfaccia. I bottoni
-/// galleggiano sopra la scena (play/pausa e reset in alto a destra), quindi non
-/// basta escludere la barra: se il mouse e' su un bottone, quel clic e' suo.
-pub fn pointer_over_ui(ui_interactions: &Query<&Interaction>) -> bool {
-    ui_interactions
-        .iter()
-        .any(|interaction| *interaction != Interaction::None)
-}
 
 /// Cella della griglia sotto il mouse, se il mouse e' sull'area di lavoro.
 /// La usano sia l'anteprima sia il piazzamento: e' cosi' che l'oggetto finisce
@@ -438,52 +396,6 @@ fn setup_file_box(mut commands: Commands, layout_file: Res<LayoutFile>) {
                 ));
             }
         });
-}
-
-/// Posto in fila in alto a destra. Le posizioni stanno qui e non sparse nei
-/// moduli: cosi' aggiungere un bottone non ne sovrappone un altro.
-pub fn top_button(slot: u32) -> (Button, Node) {
-    const WIDTH: f32 = 96.0;
-    const GAP: f32 = 8.0;
-
-    (
-        Button,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            right: Val::Px(12.0 + slot as f32 * (WIDTH + GAP)),
-            width: Val::Px(WIDTH),
-            height: Val::Px(36.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-    )
-}
-
-fn button_node() -> (Button, Node) {
-    (
-        Button,
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(34.0),
-            flex_shrink: 0.0,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        },
-    )
-}
-
-pub fn button_label(text: &str) -> (Text, TextFont, TextColor) {
-    (
-        Text::new(text),
-        TextFont {
-            font_size: 14.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-    )
 }
 
 /// Il cursore dice in che modo si e' senza doverlo andare a leggere nella barra.

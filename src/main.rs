@@ -29,6 +29,7 @@ mod source;
 mod switch;
 mod trace;
 mod turner;
+mod ui;
 
 use antenna::AntennaVisualsPlugin;
 use camera::CameraPlugin;

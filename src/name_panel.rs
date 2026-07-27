@@ -1,12 +1,14 @@
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{self, BUTTON_IDLE, Mode};
+use crate::editor;
 use crate::grid;
 use crate::layout::Placed;
 use crate::name::{NameRow, Naming, PieceName};
 use crate::piece::{Facing, PIECE_SIZE, Tool};
+use crate::simulation::Mode;
 use crate::simulation::SimulationState;
+use crate::ui::BUTTON_IDLE;
 
 const PANEL_WIDTH: f32 = 190.0;
 /// Sotto ai bottoni in alto a destra, sopra alla barra di riproduzione.

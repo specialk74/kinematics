@@ -1,14 +1,47 @@
 use bevy::prelude::*;
 
 use crate::carrier::{Carrier, NextCarrierId};
-use crate::editor::{BUTTON_READY, BUTTON_UNAVAILABLE, Mode, button_label, top_button};
 use crate::source::CarrierSource;
 use crate::trace::Replay;
+use crate::ui::{BUTTON_READY, BUTTON_UNAVAILABLE, button_label, top_button};
 
 /// Mentre gira, il bottone dice "Pausa" ed e' premibile: verde come gli altri
 /// comandi disponibili. In pausa resta l'arancio, che segnala uno stato in
 /// corso invece della semplice disponibilita'.
 const PAUSED_COLOR: Color = Color::srgb(0.75, 0.45, 0.10);
+
+/// In che modalita' e' il programma. Sono due mestieri diversi con gli stessi
+/// due tasti del mouse: nell'editor si costruisce l'impianto, in simulazione lo
+/// si comanda. Tenerli separati e' quello che libera il tasto destro, altrimenti
+/// occupato dalla rotazione.
+///
+/// Sta qui, accanto all'altro stato del programma, per due motivi: i due si
+/// intrecciano (passando in editor il tempo si ferma e il nastro si svuota), e
+/// meta' dei moduli deve sapere in che modo si e' senza per questo dover
+/// dipendere dall'editor. A registrarlo e' pero' `EditorPlugin`: senza finestra
+/// non c'e' niente da costruire, quindi non c'e' nemmeno un modo in cui stare.
+#[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Mode {
+    #[default]
+    Editing,
+    Simulating,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Editing => "Editor",
+            Mode::Simulating => "Simulazione",
+        }
+    }
+
+    pub fn other(self) -> Self {
+        match self {
+            Mode::Editing => Mode::Simulating,
+            Mode::Simulating => Mode::Editing,
+        }
+    }
+}
 
 /// Stato del mondo simulato. In pausa i carrier non si muovono e le sorgenti non
 /// emettono: si ferma il tempo, non l'editor, cosi' si puo' preparare il layout

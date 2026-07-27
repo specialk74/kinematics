@@ -1,10 +1,8 @@
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 
-use crate::editor::{
-    BUTTON_READY, BUTTON_UNAVAILABLE, DraggedPiece, EditorTool, SelectedTool, button_label,
-    pointer_over_ui, top_button,
-};
+use crate::editor::{DraggedPiece, EditorTool, SelectedTool};
+use crate::ui::{BUTTON_READY, BUTTON_UNAVAILABLE, button_label, pointer_over_ui, top_button};
 
 /// Vista di partenza, quella a cui riporta il pulsante di reset.
 const DEFAULT_ZOOM: f32 = 1.0;

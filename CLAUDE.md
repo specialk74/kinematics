@@ -44,10 +44,11 @@ Aggiungendo un oggetto nuovo, si copia quello schema.
 
 ### Stati
 
-Due assi indipendenti, entrambi `States` di Bevy:
+Due assi indipendenti, entrambi `States` di Bevy e **entrambi in `simulation.rs`**:
 
-- `editor::Mode` — `Editing` / `Simulating`: due mestieri con gli stessi tasti del mouse.
-- `simulation::SimulationState` — `Running` / `Paused` / `Replaying`.
+- `Mode` — `Editing` / `Simulating`: due mestieri con gli stessi tasti del mouse. Lo registra
+  pero' `EditorPlugin`, perche' senza finestra non c'e' niente da costruire.
+- `SimulationState` — `Running` / `Paused` / `Replaying`.
 
 I sistemi si agganciano con `run_if(in_state(...))`. Passando in editor il tempo si ferma e
 il nastro si svuota; durante una riproduzione le posizioni arrivano dal file, quindi la
@@ -105,7 +106,11 @@ contiene gli interruttori: il file descrive l'impianto, non la sua configurazion
 Ogni campo aggiunto nel tempo ha `#[serde(default)]` perche' i file vecchi continuino ad
 aprirsi — regola da mantenere.
 
-Una registrazione (`registrazione-<epoch>.ron`, `trace.rs`) porta con se' il layout, cosi' e'
+Il **formato** di una registrazione e la sua aritmetica (differenze, somme, round trip) stanno
+in `trace/file.rs`, senza niente di Bevy dentro e con tutti i test del modulo; `trace.rs` e' la
+macchina che lo usa (registrare, rigiocare, la barra). Toccando il formato si lavora nel primo.
+
+Una registrazione (`registrazione-<epoch>.ron`) porta con se' il layout, cosi' e'
 uno scenario intero. I frame sono codificati a differenze: compaiono solo i carrier che si
 sono mossi, gli interruttori solo quando cambiano, e `gone` dice chi e' uscito (senza,
 "assente" significherebbe insieme "fermo" e "uscito"). La riproduzione mette da parte il
@@ -123,6 +128,8 @@ layout in scena (`ParkedLayout`) e lo rimette al termine.
   `mod tests` in fondo al file e provano **regole pure** — funzioni come `catches`, `covers`,
   `resolve_frame`, `next_free`. Le figure disegnate (mesh, frecce, glifi) non si testano: si
   guardano. `engagement.rs` e' l'unico che monta una `App` per far girare un sistema vero.
+- **Colori, misure e forme dei comandi stanno in `ui.rs`**, non nel modulo che li usa: chi
+  aggiunge un bottone prende `top_button`/`button_label` e i `BUTTON_*` da li'.
 - **Un modulo per concetto.** I moduli piccoli (`gate`, `turner`, `reverser`, `guide`, …) sono
   tutti componente + `spawn_x` + plugin visuale, 100-200 righe: e' il modello da copiare.
 - `mqtt` ricorre nei commenti come il "domani" verso cui il codice e' orientato: id stabili e
