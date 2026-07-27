@@ -590,8 +590,19 @@ fn place_selected_tool(
     }
 
     for tool in selected.0.places() {
-        // Si guarda solo il proprio piano: un'antenna si appoggia sotto un
-        // oggetto gia' piazzato senza portarlo via, e viceversa.
+        // L'orientamento e' quello scelto prima di piazzare, quello che
+        // l'anteprima sta mostrando: niente correzioni automatiche, altrimenti
+        // l'anteprima direbbe una cosa e il piazzamento ne farebbe un'altra.
+        let facing = pending.0;
+
+        // Guida e deviatore possono benissimo dividersi la cella: il fianco
+        // che il deviatore apre lo lascia aperto la guida stessa, che dove
+        // qualcuno devia smette di disegnare quel bordo. Prima si cancellava il
+        // tratto di guida, e non bastava: quello che chiudeva il passaggio
+        // poteva essere il tratto della cella accanto, e cancellare anche
+        // quello avrebbe lasciato un buco nella parete della corsia.
+        // Chi occupa la cella. Si guarda solo il proprio piano: un'antenna si
+        // appoggia sotto un oggetto gia' piazzato senza portarlo via, e viceversa.
         let same_layer = occupant_on(
             cell,
             tool.layer(),
@@ -599,7 +610,7 @@ fn place_selected_tool(
         );
 
         if let Some((entity, occupant)) = same_layer {
-            // Stesso strumento sulla stessa cella: non si fa niente. Rifare
+            // Stesso strumento sulla stessa cella: non si rifa' niente. Rifare
             // l'oggetto gli cambierebbe id e nome, e accenderlo o spegnerlo e'
             // un mestiere della simulazione, non dell'editor.
             if occupant == tool {
@@ -608,11 +619,6 @@ fn place_selected_tool(
 
             commands.entity(entity).despawn();
         }
-
-        // L'orientamento e' quello scelto prima di piazzare, quello che
-        // l'anteprima sta mostrando: niente correzioni automatiche, altrimenti
-        // l'anteprima direbbe una cosa e il piazzamento ne farebbe un'altra.
-        let facing = pending.0;
 
         // Ogni oggetto nasce gia' identificato: il numero per le registrazioni,
         // il nome per mqtt. Il nome si cambia dal pannello, ma non resta mai
@@ -956,7 +962,8 @@ fn drag_piece(
     let Ok((_, dragging, _, _)) = placed.get(entity) else {
         return;
     };
-    let layer = dragging.tool.layer();
+    let tool = dragging.tool;
+    let layer = tool.layer();
     let occupied = placed.iter().any(|(other, placed, _, _)| {
         other != entity && placed.cell == cell && placed.tool.layer() == layer
     });

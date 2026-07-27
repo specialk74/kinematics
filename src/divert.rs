@@ -81,30 +81,38 @@ impl Divert {
         facing: Heading,
         heading: Heading,
     ) -> Option<f32> {
-        let shift = Divert::shift(facing, heading)?;
+        let shift = self.shift(facing, heading)?;
         let offset = (carrier.truncate() - position.truncate()).dot(shift.as_vec());
 
         Some((LANE_HEIGHT - offset).max(0.0))
     }
 
-    /// Da che parte il deviatore sposta un carrier che marcia in `heading`.
+    /// Da che parte il deviatore sposta un carrier che marcia in `heading`, e
+    /// `None` se quel carrier non lo riguarda.
     ///
-    /// La freccia disegnata e' la **diagonale** fra `facing` e la sua sinistra,
-    /// cioe' la traiettoria che il carrier seguira'. Quella diagonale descrive
-    /// due sole marce possibili — le sue due componenti — e per ciascuna lo
-    /// spostamento e' l'altra componente. Da un'altra direzione la diagonale non
-    /// vuol dire niente, e il deviatore non tocca nessuno.
+    /// La figura disegnata e' la **diagonale** fra `facing` e la sua sinistra:
+    /// come traiettoria descrive due marce possibili - le sue due componenti - e
+    /// per ciascuna lo spostamento sarebbe l'altra. Un oggetto solo potrebbe
+    /// quindi servire due flussi con corsie perpendicolari, e per un po' l'ha
+    /// fatto. Il guaio e' che le due corsie hanno anche i fianchi perpendicolari:
+    /// finche' non si sa quale dei due flussi e' in uso, il disegno del bordo
+    /// non puo' essere giusto, e infatti sbagliava meta' dei casi.
     ///
-    /// I due assi risultano cosi' sempre perpendicolari: e' questo che impedisce
-    /// a un deviatore di agganciare carrier lontanissimi sulla perpendicolare,
-    /// come succedeva quando freccia e marcia cadevano sullo stesso asse.
-    pub fn shift(facing: Heading, heading: Heading) -> Option<Heading> {
-        if heading == facing {
-            Some(facing.turn_left())
-        } else if heading == facing.turn_left() {
-            Some(facing)
-        } else {
-            None
+    /// Adesso a scegliere e' il **tipo**, e non a caso: divert e ATR sono la
+    /// stessa manovra a specchio. Il divert porta il carrier alla sua destra per
+    /// toglierlo dalla linea, l'ATR lo riporta alla sua sinistra per rimettercelo.
+    /// Con lo spostamento deciso, la marcia che l'oggetto aggancia e' una sola, e
+    /// il disegno puo' dire la verita'.
+    ///
+    /// I due assi restano perpendicolari, che e' cio' che impedisce a un
+    /// deviatore di agganciare carrier lontanissimi sulla perpendicolare.
+    pub fn shift(&self, facing: Heading, heading: Heading) -> Option<Heading> {
+        match self.kind {
+            // Il verso indica lo spostamento; il carrier arriva di traverso.
+            DivertKind::Divert => (heading == facing.turn_left()).then_some(facing),
+            // Il verso indica la marcia agganciata; lo spostamento e' la sua
+            // sinistra, cioe' il contrario di quello che fa il divert.
+            DivertKind::Atr => (heading == facing).then(|| facing.turn_left()),
         }
     }
 
@@ -121,7 +129,7 @@ impl Divert {
         facing: Heading,
         heading: Heading,
     ) -> bool {
-        let Some(shift) = Divert::shift(facing, heading) else {
+        let Some(shift) = self.shift(facing, heading) else {
             return false;
         };
 
@@ -280,6 +288,13 @@ mod tests {
         }
     }
 
+    fn atr() -> Divert {
+        Divert {
+            kind: DivertKind::Atr,
+            engaged: false,
+        }
+    }
+
     /// In servizio e comandato, e in servizio ma non comandato.
     const ON: Switch = Switch {
         enabled: true,
@@ -323,43 +338,58 @@ mod tests {
         );
     }
 
-    /// La freccia decide da sola: lo stesso deviatore, girato, prende il
-    /// corridoio opposto senza sapere nulla della marcia del carrier.
+    /// La freccia decide tutta la manovra: girato dall'altra parte, lo stesso
+    /// deviatore aggancia il flusso opposto e lo porta dalla parte opposta.
     #[test]
-    fn turning_the_arrow_turns_the_corridor() {
+    fn turning_the_arrow_turns_the_whole_manoeuvre() {
         let divert = divert();
         let position = Vec3::ZERO;
-        let flow = Heading::Left;
         let below = Vec3::new(0.0, -LANE_HEIGHT / 2.0, 0.0);
 
-        assert!(!divert.catches(ON, position, below, Heading::Up, flow));
-        assert!(divert.catches(ON, position, below, Heading::Left, flow));
+        assert!(
+            !divert.catches(ON, position, below, Heading::Up, Heading::Left),
+            "girato in su alza chi va a sinistra, e sotto non ha corridoio"
+        );
+        assert!(
+            divert.catches(ON, position, below, Heading::Down, Heading::Right),
+            "girato in giu' abbassa chi va a destra, e quel corridoio scende"
+        );
     }
 
-    /// La stessa freccia serve due flussi, ed e' quello che la rende leggibile:
-    /// la diagonale disegnata e' la traiettoria, e lo spostamento e' la
-    /// componente che manca alla marcia del carrier.
+    /// Divert e ATR sono la stessa manovra a specchio, e ciascuno serve un
+    /// flusso solo: il divert porta il carrier alla propria destra per toglierlo
+    /// dalla linea, l'ATR alla propria sinistra per rimettercelo. E' quello che
+    /// permette al disegno di dire da che parte la corsia si apre - finche' un
+    /// oggetto ne serviva due, non si poteva sapere.
     #[test]
-    fn the_same_diagonal_serves_the_two_flows_it_describes() {
-        // Freccia in alto a sinistra: diagonale fra "su" e "sinistra".
+    fn the_two_kinds_are_the_same_manoeuvre_mirrored() {
+        // Freccia in alto: per il divert e' lo spostamento, per l'ATR la marcia.
         let arrow = Heading::Up;
 
         assert_eq!(
-            Divert::shift(arrow, Heading::Left),
+            divert().shift(arrow, Heading::Left),
             Some(Heading::Up),
-            "chi va a sinistra viene alzato"
+            "chi va a sinistra viene alzato, cioe' spostato alla sua destra"
         );
         assert_eq!(
-            Divert::shift(arrow, Heading::Up),
+            atr().shift(arrow, Heading::Up),
             Some(Heading::Left),
-            "chi sale viene spostato a sinistra"
+            "chi sale viene spostato a sinistra, che e' la sua sinistra"
         );
+
         assert_eq!(
-            Divert::shift(arrow, Heading::Right),
+            divert().shift(arrow, Heading::Up),
             None,
-            "da destra quella diagonale non dice niente"
+            "quella marcia e' dell'ATR, non del divert"
         );
-        assert_eq!(Divert::shift(arrow, Heading::Down), None);
+        assert_eq!(atr().shift(arrow, Heading::Left), None, "e viceversa");
+
+        // Le altre due marce non le tocca nessuno dei due: gli assi restano
+        // perpendicolari.
+        for other in [Heading::Right, Heading::Down] {
+            assert_eq!(divert().shift(arrow, other), None);
+            assert_eq!(atr().shift(arrow, other), None);
+        }
     }
 
     /// Il caso che bloccava un impianto vero: un deviatore quattro celle piu' in
@@ -375,8 +405,8 @@ mod tests {
             "la sua diagonale non descrive questa marcia"
         );
         assert!(
-            !divert.catches(ON, far_above, carrier, Heading::Left, Heading::Left),
-            "la descrive, ma il carrier e' quattro celle fuori dal corridoio"
+            !divert.catches(ON, far_above, carrier, Heading::Up, Heading::Left),
+            "questa marcia la prende, ma il carrier e' quattro celle fuori dal corridoio"
         );
     }
 
@@ -391,14 +421,13 @@ mod tests {
     /// smette di deviare e comincia a sbarrare.
     #[test]
     fn a_switched_off_atr_bars_the_way_instead_of_opening_it() {
-        let atr = Divert {
-            kind: DivertKind::Atr,
-            engaged: false,
-        };
+        let atr = atr();
+        // L'ATR aggancia chi marcia nel suo stesso verso.
+        let (arrow, flow) = (Heading::Up, Heading::Up);
 
         assert!(atr.is_blocking(OFF), "non comandato, l'ATR sbarra");
         assert!(
-            !atr.catches(OFF, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left),
+            !atr.catches(OFF, Vec3::ZERO, Vec3::ZERO, arrow, flow),
             "e quindi non devia piu'"
         );
 
@@ -406,7 +435,7 @@ mod tests {
             !atr.is_blocking(ON),
             "comandato torna a essere un passaggio"
         );
-        assert!(atr.catches(ON, Vec3::ZERO, Vec3::ZERO, Heading::Up, Heading::Left));
+        assert!(atr.catches(ON, Vec3::ZERO, Vec3::ZERO, arrow, flow));
 
         // E fuori servizio sbarra allo stesso modo: senza la spinta per
         // rientrare, dalla corsia secondaria non si va da nessuna parte.
@@ -427,29 +456,27 @@ mod tests {
     /// abbandona fra due corsie: quella manovra la finisce comunque.
     #[test]
     fn a_manoeuvre_already_begun_is_finished_anyway() {
-        let mut off = Divert {
-            kind: DivertKind::Atr,
-            engaged: false,
-        };
         let position = Vec3::ZERO;
         let arrow = Heading::Up;
-        let flow = Heading::Left;
 
-        let halfway = Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0);
-        assert!(
-            off.catches(OFF, position, halfway, arrow, flow),
-            "a meta' strada la manovra prosegue"
-        );
-
-        let just_arriving = Vec3::new(0.0, 0.0, 0.0);
-        assert!(
-            !off.catches(OFF, position, just_arriving, arrow, flow),
-            "chi deve ancora cominciare non parte nemmeno"
-        );
-
-        // E lo stesso vale per il divert: la differenza fra i due e' cosa
-        // succede a chi arriva, non a chi e' gia' dentro.
-        off.kind = DivertKind::Divert;
-        assert!(off.catches(OFF, position, halfway, arrow, flow));
+        // A meta' strada vuol dire mezza cella lungo lo spostamento, che per i
+        // due tipi e' perpendicolare: l'ATR porta a sinistra, il divert in alto.
+        for (deviator, flow, halfway) in [
+            (atr(), Heading::Up, Vec3::new(-LANE_HEIGHT / 2.0, 0.0, 0.0)),
+            (
+                divert(),
+                Heading::Left,
+                Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0),
+            ),
+        ] {
+            assert!(
+                deviator.catches(OFF, position, halfway, arrow, flow),
+                "a meta' strada la manovra prosegue"
+            );
+            assert!(
+                !deviator.catches(OFF, position, Vec3::ZERO, arrow, flow),
+                "chi deve ancora cominciare non parte nemmeno"
+            );
+        }
     }
 }

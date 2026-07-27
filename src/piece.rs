@@ -113,6 +113,25 @@ impl Tool {
     pub fn is_passive(self) -> bool {
         self == Tool::Guide
     }
+
+    /// Verso quale cella confinante questo oggetto apre il fianco della corsia,
+    /// cioe' da che parte fa uscire il carrier. `None` per chi non devia
+    /// nessuno: un gate ferma dentro la corsia, un'antenna guarda e basta.
+    ///
+    /// Poterlo dire e' recente. Finche' un deviatore serviva due flussi a
+    /// seconda di come gli arrivava il carrier, l'apertura poteva essere su due
+    /// lati perpendicolari e non c'era modo di sapere quale: adesso lo decide il
+    /// tipo, come in `Divert::shift`, e questa e' la stessa regola vista da
+    /// fuori. Se una cambia, l'altra la segue.
+    pub fn opens_toward(self, facing: Facing) -> Option<Heading> {
+        match self {
+            // Il divert sposta nel verso in cui e' girato.
+            Tool::Divert => Some(facing.0),
+            // L'ATR e l'inversione portano il carrier alla propria sinistra.
+            Tool::Atr | Tool::Reverser => Some(facing.0.turn_left()),
+            _ => None,
+        }
+    }
 }
 
 /// Su che piano vive un oggetto. Serve perche' l'antenna sta sotto la linea:
@@ -177,7 +196,8 @@ pub struct PieceShapes {
     square: Handle<Mesh>,
     circle: Handle<Mesh>,
     bar: Handle<Mesh>,
-    guide_line: Handle<Mesh>,
+    /// Le quattro combinazioni di bordi disegnati, per indice `[avanti, dietro]`.
+    guide_lines: [Handle<Mesh>; 4],
     divert: Handle<Mesh>,
     atr: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
@@ -185,6 +205,16 @@ pub struct PieceShapes {
     stop: Handle<Mesh>,
     arrow_material: Handle<ColorMaterial>,
     stop_material: Handle<ColorMaterial>,
+}
+
+impl PieceShapes {
+    /// Il tratto di guida che disegna solo i bordi chiesti: `[avanti, dietro]`
+    /// rispetto al verso in cui il pezzo e' girato.
+    pub fn guide_corridor(&self, edges: [bool; 2]) -> Handle<Mesh> {
+        let index = usize::from(!edges[0]) * 2 + usize::from(!edges[1]);
+
+        self.guide_lines[index].clone()
+    }
 }
 
 /// Mesh piatta da un elenco di triangoli. Le frecce non sono figure primitive:
@@ -205,12 +235,21 @@ fn triangles(points: Vec<[f32; 3]>) -> Mesh {
 /// Il corridoio: i due bordi della corsia, uno sopra e uno sotto. E' un pezzo
 /// solo perche' una corsia sono due linee, e chiederle all'utente una per volta
 /// vorrebbe dire fargli piazzare il doppio dei pezzi per lo stesso disegno.
-fn guide_corridor() -> Mesh {
+///
+/// Non sempre pero' se ne disegnano due: dove un deviatore fa uscire il carrier,
+/// quel fianco deve aprirsi, e il tratto di guida che lo attraversa deve tacere
+/// invece di richiuderlo. Il primo dei due bordi e' quello dalla parte in cui il
+/// pezzo e' girato.
+fn guide_corridor(edges: [bool; 2]) -> Mesh {
     let half = GUIDE_LENGTH / 2.0;
     let thick = GUIDE_THICKNESS / 2.0;
     let mut points = Vec::new();
 
-    for edge in [GUIDE_OFFSET, -GUIDE_OFFSET] {
+    for (draws, edge) in edges.into_iter().zip([GUIDE_OFFSET, -GUIDE_OFFSET]) {
+        if !draws {
+            continue;
+        }
+
         let (top, bottom) = (edge + thick, edge - thick);
 
         points.extend([
@@ -291,25 +330,36 @@ fn path_head(points: &mut Vec<[f32; 3]>, neck: Vec2, tip: Vec2) {
 /// dice invece di lasciarlo capire dal colore.
 ///
 /// I bordi della corsia li disegnano i pezzi di guida, che l'utente mette dove
-/// servono; l'unico che si disegna qui e' quello che la guida non puo' mettere,
-/// cioe' il fianco della cella occupata dal divert. E' un bordo solo, e sul lato
-/// dove il carrier non passa: girato segue lo spostamento come la diagonale.
+/// servono. Qui se ne disegna **uno solo**: quello che la guida non puo' mettere,
+/// perche' la cella la occupa il deviatore. Sta sempre dalla parte opposta allo
+/// spostamento - dall'altra il passaggio serve davvero, e' di li' che si esce -
+/// e tiene chiuso il fianco lungo cui il flusso deve poter tirare dritto.
 ///
-/// Divert e ATR condividono la figura perche' condividono il movimento: a
-/// distinguerli sono il colore e il verso in cui li si gira.
+/// I due lo hanno perpendicolare, ed e' la conseguenza visibile del fatto che
+/// sono la stessa manovra a specchio: il divert aggancia un flusso che gli passa
+/// di traverso e lo spinge nel proprio verso, quindi la sua corsia e' quella
+/// perpendicolare al verso; l'ATR aggancia il flusso che marcia nel proprio
+/// verso, quindi la sua corsia e' quella. Fianchi di corsie perpendicolari sono
+/// perpendicolari anche loro.
+///
+/// Poterlo dire e' recente: finche' un deviatore serviva due flussi a seconda di
+/// come gli arrivava il carrier, quale fosse la sua corsia non si sapeva, e il
+/// bordo cadeva di traverso in meta' dei casi. Adesso lo decide `Divert::shift`
+/// guardando il tipo.
+///
+/// Divert e ATR condividono la traiettoria perche' condividono il movimento: a
+/// distinguerli sono il colore, il fianco e il verso in cui li si gira.
 fn divert_glyph(from_the_main_lane: bool) -> Mesh {
     let half = GRID_STEP / 2.0;
     // Il divert disegna una corsia piu' in la', l'ATR in casa propria.
     let lane = if from_the_main_lane { GRID_STEP } else { 0.0 };
     let mut points = Vec::new();
 
-    // Il fianco della corsia, che il divert si porta dietro. La sua cella sta in
-    // mezzo alla corsia principale e la occupa lui: li' un pezzo di guida non ci
-    // sta, e il bordo del corridoio resterebbe interrotto proprio dove il flusso
-    // deve poter tirare dritto. Va sul lato opposto alla deviazione, perche'
-    // dall'altra parte l'apertura serve davvero: e' di li' che si esce.
-    // L'ATR non ne ha bisogno - vive nella corsia secondaria, dove i bordi sono
-    // quelli che l'utente disegna attorno al ramo.
+    // Il fianco che il divert si porta dietro, sul lato opposto allo
+    // spostamento: la sua cella sta in mezzo alla corsia principale e il flusso
+    // li' deve poter anche tirare dritto. L'ATR non ne ha bisogno - il bordo del
+    // ramo lo disegnano i tratti di guida, che sanno tacere dove il passaggio si
+    // apre - e disegnarglielo lo lasciava sospeso in mezzo al niente.
     if from_the_main_lane {
         thick_segment(
             &mut points,
@@ -440,7 +490,12 @@ fn setup_piece_shapes(
         square: meshes.add(Rectangle::new(PIECE_SIZE, PIECE_SIZE)),
         circle: meshes
             .add(Mesh::from(Circle::new(ANTENNA_RADIUS)).translated_by(Vec3::Y * ANTENNA_OFFSET)),
-        guide_line: meshes.add(guide_corridor()),
+        guide_lines: [
+            meshes.add(guide_corridor([true, true])),
+            meshes.add(guide_corridor([true, false])),
+            meshes.add(guide_corridor([false, true])),
+            meshes.add(guide_corridor([false, false])),
+        ],
         divert: meshes.add(divert_glyph(true)),
         atr: meshes.add(divert_glyph(false)),
         // La sbarra e' spostata nella mesh stessa e non nel Transform: la
@@ -504,7 +559,7 @@ pub fn dressing(shapes: &PieceShapes, tool: Tool) -> (Handle<Mesh>, Arrow) {
         Tool::Reverser => (shapes.reverser.clone(), Arrow::None),
         Tool::Antenna => (shapes.circle.clone(), Arrow::None),
         Tool::TubeSensor | Tool::CarrierSensor => (shapes.bar.clone(), Arrow::None),
-        Tool::Guide => (shapes.guide_line.clone(), Arrow::None),
+        Tool::Guide => (shapes.guide_corridor([true, true]), Arrow::None),
     }
 }
 
@@ -554,6 +609,7 @@ fn orient_pieces(pieces: Query<(&Facing, &mut Transform), Changed<Facing>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     /// La sbarra sta su un lato della cella e lascia libero il centro: e' li'
     /// che va l'antenna, ed e' li' che si ferma il carrier.
     #[test]
@@ -593,6 +649,33 @@ mod tests {
 
         assert!(covers(Tool::Atr, Facing::default(), Vec2::ZERO, inside));
         assert!(!covers(Tool::Atr, Facing::default(), Vec2::ZERO, outside));
+    }
+
+    /// Da che parte si apre il fianco della corsia. E' la stessa regola che
+    /// `Divert::shift` applica al movimento, vista da chi disegna: il divert
+    /// sposta nel verso in cui e' girato, l'ATR e l'inversione alla propria
+    /// sinistra. Le due devono restare d'accordo, altrimenti il disegno torna a
+    /// raccontare una manovra che l'impianto non fa.
+    #[test]
+    fn the_lane_opens_where_the_carrier_leaves_it() {
+        let up = Facing(Heading::Up);
+
+        assert_eq!(Tool::Divert.opens_toward(up), Some(Heading::Up));
+        assert_eq!(Tool::Atr.opens_toward(up), Some(Heading::Left));
+        assert_eq!(
+            Tool::Reverser.opens_toward(up),
+            Some(Heading::Left),
+            "anche l'inversione esce dal fianco sinistro"
+        );
+    }
+
+    /// Chi non devia nessuno non apre niente, e con un tratto di guida convive
+    /// senza contraddirlo: un gate ferma dentro la corsia, un'antenna guarda.
+    #[test]
+    fn a_piece_that_diverts_nobody_leaves_the_lane_closed() {
+        for quiet in [Tool::Gate, Tool::Antenna, Tool::CarrierSource, Tool::Guide] {
+            assert_eq!(quiet.opens_toward(Facing::default()), None, "{quiet:?}");
+        }
     }
 
     /// L'antenna deve finire sotto ai carrier, che viaggiano a quota zero, e

@@ -518,9 +518,10 @@ fn carrier_step(
 
         // La freccia disegna la diagonale: lo spostamento e' la sua componente
         // trasversale alla marcia del carrier.
-        let Some(sideways) = Divert::shift(*facing, heading).map(Heading::as_vec) else {
+        let Some(sideways_heading) = divert.shift(*facing, heading) else {
             continue;
         };
+        let sideways = sideways_heading.as_vec();
         let offset = (translation.truncate() - position.truncate()).dot(sideways);
         // Il passo di lato non supera mai la destinazione: e' questo che fa
         // arrivare il carrier esattamente sulla linea voluta, invece di
@@ -1022,15 +1023,17 @@ mod tests {
     /// restando fra due corsie.
     #[test]
     fn a_carrier_caught_mid_manoeuvre_still_finishes_it() {
-        let off_atr = Divert {
-            kind: DivertKind::Atr,
-            engaged: false,
-        };
+        let off_atr = atr();
         let atr_position = Vec3::ZERO;
-        let diverts = [(&off_atr, OFF_COMMAND, Heading::Up, atr_position)];
+        // L'ATR aggancia chi marcia nel suo stesso verso e lo riporta alla
+        // propria sinistra: girato a destra, il rientro e' verso l'alto.
+        let diverts = [(&off_atr, OFF_COMMAND, Heading::Right, atr_position)];
         let track = only_diverts(&diverts);
 
-        let carrier = carrier(CarrierType::WithTube);
+        let carrier = Carrier {
+            motion: Motion::Straight(Heading::Right),
+            ..carrier(CarrierType::WithTube)
+        };
         // Gia' dentro la manovra: mezza corsia sopra la linea di partenza.
         let start = Vec3::new(0.0, LANE_HEIGHT / 2.0, 0.0);
 
