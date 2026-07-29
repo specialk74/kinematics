@@ -119,7 +119,7 @@ impl EditorTool {
 }
 
 /// Ordine dei bottoni nella barra.
-const MODES: [EditorTool; 14] = [
+const MODES: [EditorTool; 15] = [
     EditorTool::Pan,
     EditorTool::Erase,
     EditorTool::Place(Tool::CarrierSource),
@@ -133,6 +133,7 @@ const MODES: [EditorTool; 14] = [
     EditorTool::Place(Tool::TubeSensor),
     EditorTool::Place(Tool::CarrierSensor),
     EditorTool::Place(Tool::Guide),
+    EditorTool::Place(Tool::GuideLine),
     EditorTool::GateWithAntenna,
 ];
 

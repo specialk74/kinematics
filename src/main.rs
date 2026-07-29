@@ -41,7 +41,7 @@ use editor::EditorPlugin;
 use engagement::EngagementPlugin;
 use gate::GateVisualsPlugin;
 use grid::GridPlugin;
-use guide::GuideVisualsPlugin;
+use guide::{GuidePlugin, GuideVisualsPlugin};
 use layout::LayoutPlugin;
 use name::NamePlugin;
 use name_panel::NamePanelPlugin;
@@ -170,6 +170,10 @@ fn main() {
         // Sensori, antenne e deviatori si accorgono dei carrier anche senza
         // finestra: quello stato servira' a mqtt, non solo al colore.
         EngagementPlugin,
+        // Le guide sono muri, non disegno: senza questo plugin i carrier le
+        // attraverserebbero in headless e l'impianto si comporterebbe in due
+        // modi diversi a seconda che ci sia una finestra a guardarlo.
+        GuidePlugin,
     ))
     .run();
 }

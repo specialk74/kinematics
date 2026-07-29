@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::carrier::{CARRIER_RADIUS, Heading};
 use crate::grid::GRID_STEP;
+use crate::guide::GuideShape;
 
 pub const PIECE_SIZE: f32 = 30.0;
 /// Un paio di pixel piu' larga di un carrier: quando il carrier le si ferma
@@ -70,8 +71,11 @@ pub enum Tool {
     TubeSensor,
     /// La stessa cosa, ma conta qualunque carrier.
     CarrierSensor,
-    /// Un tratto di guida: disegno e basta, non tocca il flusso.
+    /// Un tratto di corridoio: i due bordi di una corsia.
     Guide,
+    /// Un bordo solo, dalla parte verso cui e' girato. Serve dove i due lati non
+    /// sono simmetrici e il corridoio metterebbe un muro dove invece si passa.
+    GuideLine,
 }
 
 impl Tool {
@@ -88,6 +92,7 @@ impl Tool {
             Tool::TubeSensor => "Sens. tubo",
             Tool::CarrierSensor => "Sens. carrier",
             Tool::Guide => "Guida",
+            Tool::GuideLine => "Guida singola",
         }
     }
 
@@ -100,7 +105,7 @@ impl Tool {
 
     pub fn layer(self) -> Layer {
         match self {
-            Tool::Guide => Layer::Rail,
+            Tool::Guide | Tool::GuideLine => Layer::Rail,
             Tool::Antenna => Layer::Under,
             Tool::TubeSensor | Tool::CarrierSensor => Layer::Side,
             _ => Layer::Track,
@@ -111,7 +116,7 @@ impl Tool {
     /// nome da dire a mqtt, e quindi niente da mostrare nell'elenco dei nomi
     /// ne' da scrivere nelle registrazioni. Un impianto ne contiene molti.
     pub fn is_passive(self) -> bool {
-        self == Tool::Guide
+        matches!(self, Tool::Guide | Tool::GuideLine)
     }
 
     /// Verso quale cella confinante questo oggetto apre il fianco della corsia,
@@ -129,6 +134,12 @@ impl Tool {
             Tool::Divert => Some(facing.0),
             // L'ATR e l'inversione portano il carrier alla propria sinistra.
             Tool::Atr | Tool::Reverser => Some(facing.0.turn_left()),
+            // La svolta non sposta di corsia: ci esce, e lo fa dalla parte in
+            // cui e' girata. Contarla e' diventato necessario da quando le
+            // guide sono muri veri - prima il carrier attraversava il bordo
+            // disegnato e nessuno se ne accorgeva, adesso ci sbatterebbe e la
+            // svolta diventerebbe un vicolo cieco.
+            Tool::Turner => Some(facing.0),
             _ => None,
         }
     }
@@ -196,8 +207,10 @@ pub struct PieceShapes {
     square: Handle<Mesh>,
     circle: Handle<Mesh>,
     bar: Handle<Mesh>,
-    /// Le quattro combinazioni di bordi disegnati, per indice `[avanti, dietro]`.
-    guide_lines: [Handle<Mesh>; 4],
+    /// Le figure delle guide: per ogni forma, le quattro combinazioni di bordi
+    /// aperti. Una forma che di un lato non sa niente ne ripete due uguali, e
+    /// costano due triangoli: meno di un ramo in piu' da tenere d'accordo.
+    guide_lines: [[Handle<Mesh>; 4]; 2],
     divert: Handle<Mesh>,
     atr: Handle<Mesh>,
     straight_arrow: Handle<Mesh>,
@@ -208,12 +221,12 @@ pub struct PieceShapes {
 }
 
 impl PieceShapes {
-    /// Il tratto di guida che disegna solo i bordi chiesti: `[avanti, dietro]`
-    /// rispetto al verso in cui il pezzo e' girato.
-    pub fn guide_corridor(&self, edges: [bool; 2]) -> Handle<Mesh> {
+    /// La figura di un tratto di guida di quella forma, con aperti i bordi
+    /// chiesti: `[avanti, dietro]` rispetto al verso in cui il pezzo e' girato.
+    pub fn guide_lines(&self, shape: GuideShape, edges: [bool; 2]) -> Handle<Mesh> {
         let index = usize::from(!edges[0]) * 2 + usize::from(!edges[1]);
 
-        self.guide_lines[index].clone()
+        self.guide_lines[shape.slot()][index].clone()
     }
 }
 
@@ -240,29 +253,25 @@ fn triangles(points: Vec<[f32; 3]>) -> Mesh {
 /// quel fianco deve aprirsi, e il tratto di guida che lo attraversa deve tacere
 /// invece di richiuderlo. Il primo dei due bordi e' quello dalla parte in cui il
 /// pezzo e' girato.
-fn guide_corridor(edges: [bool; 2]) -> Mesh {
-    let half = GUIDE_LENGTH / 2.0;
-    let thick = GUIDE_THICKNESS / 2.0;
+/// I tratti da cui e' fatta la figura li dice `guide::strokes`, e non li rifa'
+/// qui: la stessa lista diventa i muri che fermano i carrier. Passando di li'
+/// una guida non puo' disegnare un bordo dove non ferma nessuno, ne' fermare
+/// qualcuno dove non ha disegnato niente - che e' il guaio che si vedeva a
+/// schermo quando il disegno era l'unica cosa che le guide facevano.
+fn guide_lines(shape: GuideShape, edges: [bool; 2]) -> Mesh {
     let mut points = Vec::new();
 
-    for (draws, edge) in edges.into_iter().zip([GUIDE_OFFSET, -GUIDE_OFFSET]) {
-        if !draws {
-            continue;
-        }
-
-        let (top, bottom) = (edge + thick, edge - thick);
-
-        points.extend([
-            [-half, bottom, 0.0],
-            [half, bottom, 0.0],
-            [half, top, 0.0],
-            [-half, bottom, 0.0],
-            [half, top, 0.0],
-            [-half, top, 0.0],
-        ]);
+    for [from, to] in crate::guide::strokes(shape, edges) {
+        thick_segment(&mut points, from, to, GUIDE_THICKNESS);
     }
 
     triangles(points)
+}
+
+/// Le quattro combinazioni di bordi aperti, per una forma di guida.
+fn guide_meshes(meshes: &mut Assets<Mesh>, shape: GuideShape) -> [Handle<Mesh>; 4] {
+    [[true, true], [true, false], [false, true], [false, false]]
+        .map(|edges| meshes.add(guide_lines(shape, edges)))
 }
 
 /// Spessore della traiettoria disegnata dentro un oggetto, e misure della punta
@@ -491,10 +500,8 @@ fn setup_piece_shapes(
         circle: meshes
             .add(Mesh::from(Circle::new(ANTENNA_RADIUS)).translated_by(Vec3::Y * ANTENNA_OFFSET)),
         guide_lines: [
-            meshes.add(guide_corridor([true, true])),
-            meshes.add(guide_corridor([true, false])),
-            meshes.add(guide_corridor([false, true])),
-            meshes.add(guide_corridor([false, false])),
+            guide_meshes(&mut meshes, GuideShape::Corridor),
+            guide_meshes(&mut meshes, GuideShape::Single),
         ],
         divert: meshes.add(divert_glyph(true)),
         atr: meshes.add(divert_glyph(false)),
@@ -530,7 +537,7 @@ pub fn covers(tool: Tool, facing: Facing, centre: Vec2, point: Vec2) -> bool {
         // La linea e' sottile: pretendere il clic sui suoi quattro pixel
         // sarebbe una caccia al pixel. Vale tutta la cella, tanto sotto di lei
         // non c'e' nient'altro.
-        Tool::Guide => offset.abs().cmple(Vec2::splat(GRID_STEP / 2.0)).all(),
+        Tool::Guide | Tool::GuideLine => offset.abs().cmple(Vec2::splat(GRID_STEP / 2.0)).all(),
         Tool::Antenna => {
             let local = facing.0.rotation().inverse() * offset.extend(0.0);
 
@@ -559,7 +566,17 @@ pub fn dressing(shapes: &PieceShapes, tool: Tool) -> (Handle<Mesh>, Arrow) {
         Tool::Reverser => (shapes.reverser.clone(), Arrow::None),
         Tool::Antenna => (shapes.circle.clone(), Arrow::None),
         Tool::TubeSensor | Tool::CarrierSensor => (shapes.bar.clone(), Arrow::None),
-        Tool::Guide => (shapes.guide_corridor([true, true]), Arrow::None),
+        // Chiuse tutt'e due: e' l'anteprima, che non ha ancora una cella in cui
+        // guardarsi attorno. I bordi veri glieli da' `refresh_guides` appena il
+        // pezzo e' piazzato.
+        Tool::Guide => (
+            shapes.guide_lines(GuideShape::Corridor, crate::guide::CLOSED),
+            Arrow::None,
+        ),
+        Tool::GuideLine => (
+            shapes.guide_lines(GuideShape::Single, crate::guide::CLOSED),
+            Arrow::None,
+        ),
     }
 }
 
@@ -666,6 +683,11 @@ mod tests {
             Tool::Reverser.opens_toward(up),
             Some(Heading::Left),
             "anche l'inversione esce dal fianco sinistro"
+        );
+        assert_eq!(
+            Tool::Turner.opens_toward(up),
+            Some(Heading::Up),
+            "la svolta esce di li' e il muro non deve chiuderle la strada"
         );
     }
 

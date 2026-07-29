@@ -48,7 +48,7 @@ pub fn bar(position: Vec3, facing: Heading) -> Blocker {
         along.x.abs() * BAR_LENGTH + along.y.abs() * BAR_THICKNESS,
     ) / 2.0;
 
-    Blocker { centre, half }
+    Blocker::Box { centre, half }
 }
 
 /// Piazza un gate gia' attivo. La z lo tiene davanti ai carrier, cosi' la sbarra
@@ -127,7 +127,9 @@ mod tests {
     /// gate accostati fanno un muro continuo invece di sovrapporsi.
     #[test]
     fn the_bar_stays_inside_its_own_cell() {
-        let Blocker { centre, half } = bar(Vec3::ZERO, Heading::Left);
+        let Blocker::Box { centre, half } = bar(Vec3::ZERO, Heading::Left) else {
+            panic!("la sbarra e' un rettangolo");
+        };
 
         assert_eq!(centre.x + half.x, -GRID_STEP / 2.0 + BAR_THICKNESS);
         assert!(centre.x - half.x >= -GRID_STEP / 2.0);

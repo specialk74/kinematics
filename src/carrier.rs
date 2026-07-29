@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::divert::{Divert, LANE_HEIGHT};
 use crate::gate::{self, Gate};
-use crate::geometry::circle_touches_box;
+use crate::geometry::{circle_touches_box, circle_touches_segment};
+use crate::guide::GuideWalls;
 use crate::piece::{Facing, PIECE_SIZE};
 use crate::reverser::{Reverser, TURN_RADIUS};
 use crate::simulation::SimulationState;
@@ -541,19 +542,39 @@ fn carrier_step(
     (straight, carrier.motion)
 }
 
-/// Un ostacolo fermo sulla scena: un rettangolo che i carrier non attraversano.
-/// Il gate ne occupa una striscia di lato, un ATR spento tutta la sua cella.
+/// Un ostacolo fermo sulla scena: qualcosa che i carrier non attraversano.
+///
+/// Ce ne sono due figure perche' due sono i mestieri. Il rettangolo e' l'oggetto
+/// che sbarra la cella: il gate ne occupa una striscia di lato, un ATR spento
+/// tutta la cella, e in tutti e due i casi sta allineato agli assi. Il segmento
+/// e' il muro di una guida, che allineato agli assi non e' detto che sia: oltre
+/// alla linea dritta ci sono la diagonale e l'arco, e un arco e' una spezzata di
+/// segmenti - la stessa con cui `piece::thick_arc` lo disegna.
 #[derive(Clone, Copy, Debug)]
-pub struct Blocker {
-    pub centre: Vec3,
-    pub half: Vec2,
+pub enum Blocker {
+    Box {
+        centre: Vec3,
+        half: Vec2,
+    },
+    Segment {
+        from: Vec2,
+        to: Vec2,
+        half_thickness: f32,
+    },
 }
 
 /// Vero se un cerchio di raggio `radius` centrato in `point` tocca l'ostacolo.
 /// Il raggio arriva da fuori: cosi' l'ostacolo non ha bisogno di sapere nulla
 /// di com'e' fatto un carrier.
 pub fn blocks(blocker: Blocker, point: Vec3, radius: f32) -> bool {
-    circle_touches_box(blocker.centre, blocker.half, point, radius)
+    match blocker {
+        Blocker::Box { centre, half } => circle_touches_box(centre, half, point, radius),
+        Blocker::Segment {
+            from,
+            to,
+            half_thickness,
+        } => circle_touches_segment(from, to, half_thickness, point, radius),
+    }
 }
 
 /// Quello che serve sapere di un carrier per far avanzare un frame.
@@ -614,6 +635,7 @@ pub fn resolve_frame(
 
 fn move_carrier(
     time: Res<Time>,
+    walls: Res<GuideWalls>,
     mut query: Query<(Entity, &mut Carrier, &mut Transform)>,
     gates: Query<(&Gate, &Switch, &Facing, &Transform), Without<Carrier>>,
     diverts: Query<(&Divert, &Switch, &Facing, &Transform), Without<Carrier>>,
@@ -652,11 +674,16 @@ fn move_carrier(
             diverts
                 .iter()
                 .filter(|(divert, switch, _, _)| divert.is_blocking(*switch))
-                .map(|(_, _, _, position)| Blocker {
+                .map(|(_, _, _, position)| Blocker::Box {
                     centre: *position,
                     half: Vec2::splat(PIECE_SIZE / 2.0),
                 }),
         )
+        // I muri delle guide: gia' pronti, ricalcolati solo quando il layout
+        // cambia. Sono tanti - due per ogni tratto, e un arco molti di piu' -
+        // e rifarli a ogni frame vorrebbe dire rifare lo stesso conto sessanta
+        // volte al secondo per un impianto che sta fermo.
+        .chain(walls.0.iter().copied())
         .collect();
 
     let entities: Vec<Entity> = query.iter().map(|(entity, _, _)| entity).collect();
@@ -695,7 +722,8 @@ mod tests {
     use crate::divert::{DIVERT_ZONE_HALF_WIDTH, DivertKind, LANE_HEIGHT};
     use crate::gate;
     use crate::grid::GRID_STEP;
-    use crate::piece::{ANTENNA_OFFSET, ANTENNA_RADIUS};
+    use crate::guide;
+    use crate::piece::{ANTENNA_OFFSET, ANTENNA_RADIUS, Tool};
 
     const DELTA: f32 = 1.0 / 60.0;
 
@@ -720,7 +748,7 @@ mod tests {
 
     /// Un ostacolo che chiude tutta la cella: e' l'ATR spento.
     fn cell_blocker(position: Vec3) -> Blocker {
-        Blocker {
+        Blocker::Box {
             centre: position,
             half: Vec2::splat(PIECE_SIZE / 2.0),
         }
@@ -1382,6 +1410,165 @@ mod tests {
             "SMP-00000042",
             "sta comodamente nei 24 caratteri"
         );
+    }
+
+    /// Le guide sono muri, e qui si vede sul movimento vero invece che sulla
+    /// geometria: lo stesso divert, con e senza il fianco aperto nella corsia di
+    /// sopra. Col bordo chiuso il carrier resta appeso a meta' manovra, col
+    /// bordo aperto la porta a termine.
+    ///
+    /// Sono i due lati della stessa regola: se il muro non ci fosse, il primo
+    /// caso salirebbe lo stesso e il disegno starebbe mentendo; se il buco non
+    /// ci fosse, ogni divert sarebbe un vicolo cieco.
+    #[test]
+    fn a_walled_lane_stops_the_manoeuvre_and_an_open_one_lets_it_finish() {
+        let divert = Divert {
+            kind: DivertKind::Divert,
+            engaged: false,
+        };
+        let diverts = [(&divert, ON, Heading::Up, Vec3::ZERO)];
+        let track = only_diverts(&diverts);
+        let carrier = carrier(CarrierType::WithTube);
+
+        let manoeuvre_with = |edges: [bool; 2]| {
+            // Il tratto di guida della corsia di sopra: il suo bordo di sotto e'
+            // quello che il carrier deve attraversare per arrivarci.
+            let above = Vec3::new(0.0, LANE_HEIGHT, 0.0);
+            let walls = guide::walls(above, Heading::Up, guide::GuideShape::Corridor, edges);
+            let mut position = Vec3::new(2.0 * GRID_STEP, 0.0, 0.0);
+
+            for _ in 0..600 {
+                let resolved = {
+                    let belt = [Moving {
+                        carrier: &carrier,
+                        position,
+                    }];
+
+                    resolve_frame(&belt, &track, &walls, DELTA)
+                };
+                position = resolved[0].0;
+            }
+
+            position
+        };
+
+        let walled = manoeuvre_with(guide::CLOSED);
+        // Aperto dalla parte da cui arriva il carrier, cioe' dietro: e' quello
+        // che `edges_for` calcola quando trova un divert nella cella di sotto.
+        let opened = manoeuvre_with([true, false]);
+
+        assert!(
+            walled.y < LANE_HEIGHT / 2.0,
+            "col fianco chiuso il carrier deve restare sotto il muro, non a y = {}",
+            walled.y
+        );
+        assert!(
+            (opened.y - LANE_HEIGHT).abs() < 0.01,
+            "col fianco aperto deve arrivare in corsia, non a y = {}",
+            opened.y
+        );
+    }
+
+    /// Il corridoio disegnato attraverso la cella di una svolta: il carrier ci
+    /// arriva dentro, gira, e deve poterne uscire dal fianco. E' il caso che ha
+    /// costretto a contare anche la svolta fra i pezzi che aprono la corsia -
+    /// finche' le guide erano disegno il carrier attraversava il bordo e nessuno
+    /// se ne accorgeva, adesso ogni svolta sarebbe un vicolo cieco.
+    #[test]
+    fn a_turner_can_leave_a_corridor_drawn_across_its_own_cell() {
+        let turner = Turner { engaged: false };
+        let turners = [(&turner, ON, Heading::Up, Vec3::ZERO)];
+        let track = Track {
+            diverts: &[],
+            turners: &turners,
+            reversers: &[],
+        };
+
+        let rise_with = |edges: [bool; 2]| {
+            let walls = guide::walls(Vec3::ZERO, Heading::Up, guide::GuideShape::Corridor, edges);
+            let mut carrier = carrier(CarrierType::Empty);
+            let mut position = Vec3::new(2.0 * GRID_STEP, 0.0, 0.0);
+
+            for _ in 0..400 {
+                let resolved = {
+                    let belt = [Moving {
+                        carrier: &carrier,
+                        position,
+                    }];
+
+                    resolve_frame(&belt, &track, &walls, DELTA)
+                };
+                position = resolved[0].0;
+                if let Some(motion) = resolved[0].1 {
+                    carrier.motion = motion;
+                }
+            }
+
+            position
+        };
+
+        // I bordi che la guida tiene davvero, vista la svolta nella sua cella.
+        let edges = guide::edges_for(
+            IVec2::ZERO,
+            Facing(Heading::Up),
+            &[(IVec2::ZERO, Tool::Turner, Facing(Heading::Up))],
+        );
+
+        assert!(
+            rise_with(edges).y > GRID_STEP,
+            "la svolta apre il fianco: il carrier deve salire e uscirne"
+        );
+        assert!(
+            rise_with(guide::CLOSED).y < GRID_STEP / 2.0,
+            "e se quel fianco restasse chiuso, resterebbe incastrato - che e' il \
+             motivo per cui la svolta conta fra i pezzi che aprono la corsia"
+        );
+    }
+
+    /// Un carrier che corre dentro il corridoio non tocca i suoi bordi: se li
+    /// toccasse, le guide sarebbero un impianto che si ferma da solo.
+    #[test]
+    fn a_carrier_runs_down_a_walled_corridor_without_touching_it() {
+        let empty_track = Track {
+            diverts: &[],
+            turners: &[],
+            reversers: &[],
+        };
+        // Quattro celle di corridoio in fila, girate in su: i bordi corrono
+        // sopra e sotto la linea di marcia.
+        let corridor: Vec<Blocker> = (-2..2)
+            .flat_map(|cell| {
+                guide::walls(
+                    Vec3::new(cell as f32 * GRID_STEP, 0.0, 0.0),
+                    Heading::Up,
+                    guide::GuideShape::Corridor,
+                    guide::CLOSED,
+                )
+            })
+            .collect();
+
+        let carrier = carrier(CarrierType::Empty);
+        let start = Vec3::new(2.0 * GRID_STEP, 0.0, 0.0);
+        let mut position = start;
+
+        for _ in 0..300 {
+            let resolved = {
+                let belt = [Moving {
+                    carrier: &carrier,
+                    position,
+                }];
+
+                resolve_frame(&belt, &empty_track, &corridor, DELTA)
+            };
+            position = resolved[0].0;
+        }
+
+        assert!(
+            position.x < start.x - 3.0 * GRID_STEP,
+            "ha percorso il corridoio, invece si e' fermato a x = {}",
+            position.x
+        );
+        assert_eq!(position.y, 0.0, "senza uscire dalla corsia");
     }
 
     #[test]

@@ -124,7 +124,11 @@ pub fn place_in_cell(
         Tool::CarrierSensor => {
             crate::sensor::spawn_sensor(commands, position, crate::sensor::SensorKind::Carrier)
         }
-        Tool::Guide => crate::guide::spawn_guide(commands, position),
+        Tool::Guide | Tool::GuideLine => crate::guide::spawn_guide(
+            commands,
+            position,
+            crate::guide::GuideShape::of(tool).expect("e' una guida"),
+        ),
     };
 
     commands
