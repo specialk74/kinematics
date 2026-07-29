@@ -15,9 +15,9 @@ pub struct Guide(pub GuideShape);
 /// Il corridoio e' la forma comoda: una corsia sono due bordi, e chiederli
 /// all'utente uno per volta vorrebbe dire fargli piazzare il doppio dei pezzi
 /// per lo stesso disegno. La singola serve dove i due bordi non sono simmetrici
-/// - un innesto, la parete esterna di una curva, il fianco che si affaccia su
-/// una cella gia' occupata da un altro pezzo - e li' il corridoio metterebbe un
-/// muro dove il passaggio serve.
+/// (un innesto, la parete esterna di una curva, il fianco che si affaccia su una
+/// cella gia' occupata da un altro pezzo), e li' il corridoio metterebbe un muro
+/// dove il passaggio serve.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GuideShape {
     Corridor,

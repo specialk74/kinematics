@@ -2,6 +2,10 @@
 name = "chapter1"
 version = "0.1.0"
 edition = "2024"
+# Da quando c'e' anche il broker di prova i binari sono due, e senza dirlo
+# `cargo run` non saprebbe piu' quale far partire: resta il simulatore, che e'
+# quello che si lancia sempre. Il broker si chiede per nome, `--bin broker`.
+default-run = "chapter1"
 
 [dependencies]
 bevy = "0.18"
@@ -10,6 +14,15 @@ rand = "0.10.0"
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
+# MQTT: il client lo usa il simulatore, il broker il binario di prova. Senza le
+# funzioni di serie perche' quelle portano TLS, che su una rete di stabilimento
+# chiusa non serve e in compilazione pesa.
+rumqttc = { version = "0.25", default-features = false }
+rumqttd = { version = "0.20", default-features = false }
+# I messaggi sul bus sono JSON e non RON: il programma di comando dall'altra
+# parte non e' detto che sia scritto in Rust, e questa e' la lingua che leggono
+# tutti. Dentro il repo invece i file restano RON.
+serde_json = "1"
 
 # Enable a small amount of optimization in the dev profile
 [profile.dev]

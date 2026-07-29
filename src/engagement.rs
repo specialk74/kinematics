@@ -42,6 +42,18 @@ pub trait Engaged: Component<Mutability = Mutable> {
     }
 }
 
+/// Lo stesso "ho un carrier fra le mani", ma nella forma che serve a chi non sa
+/// di che tipo di oggetto si tratta: mqtt pubblica lo stato di tutti gli oggetti
+/// con un messaggio solo, e non puo' chiedere a ciascuno con il suo tipo.
+///
+/// E' una copia, e le copie di solito sono un guaio; questa la scrive un solo
+/// sistema - `mark_engaged`, nello stesso istante in cui aggiorna l'originale -
+/// quindi non esiste un momento in cui le due si contraddicono. L'alternativa
+/// era un elenco dei tipi dentro mqtt, cioe' un secondo posto da tenere
+/// d'accordo con `EngagementPlugin` ogni volta che nasce un oggetto nuovo.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Engagement(pub bool);
+
 /// Vero se il carrier e' nella cella dell'oggetto. La usano svolta e
 /// inversione, la cui azione dura un frame solo - l'istante in cui cambiano la
 /// marcia al carrier: accendersi solo li' sarebbe un lampo invisibile, quindi
@@ -58,9 +70,21 @@ pub fn in_the_same_cell(at: Vec3, carrier_at: Vec3) -> bool {
 /// Un sistema solo per tutti gli oggetti che sanno rispondere a `reaches`.
 pub fn mark_engaged<T: Engaged>(
     carriers: Query<(&Carrier, &Transform)>,
-    objects: Query<(&mut T, &Switch, &Facing, &Transform), Without<Carrier>>,
+    // La copia per mqtt e' facoltativa: i pezzi la ricevono quando nascono, ma
+    // un oggetto montato a mano in un test non ne ha bisogno per rispondere se
+    // ha un carrier fra le mani.
+    objects: Query<
+        (
+            &mut T,
+            &Switch,
+            &Facing,
+            &Transform,
+            Option<&mut Engagement>,
+        ),
+        Without<Carrier>,
+    >,
 ) {
-    for (mut object, switch, facing, at) in objects {
+    for (mut object, switch, facing, at, shared) in objects {
         let really = carriers.iter().any(|(carrier, carrier_at)| {
             object.reaches(
                 *switch,
@@ -79,6 +103,11 @@ pub fn mark_engaged<T: Engaged>(
         // `Changed<T>`, e riscriverlo ogni frame lo sveglierebbe per niente.
         if object.engaged() != engaged {
             object.set_engaged(engaged);
+        }
+        if let Some(mut shared) = shared
+            && shared.0 != engaged
+        {
+            shared.0 = engaged;
         }
     }
 }

@@ -70,7 +70,9 @@ fn setup_panel(mut commands: Commands) {
             top: Val::Px(PANEL_TOP),
             right: Val::Px(12.0),
             width: Val::Px(PANEL_WIDTH),
-            max_height: Val::Percent(65.0),
+            // Meno di prima: sotto, in basso a destra, adesso c'e' il pannello
+            // del collegamento, e due pannelli sovrapposti non si leggono.
+            max_height: Val::Percent(45.0),
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(Val::Px(6.0)),
             row_gap: Val::Px(2.0),

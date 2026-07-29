@@ -144,6 +144,11 @@ pub fn place_in_cell(
             Switch::fresh(tool.forces_signal()),
             PieceId(who.id),
             PieceName(who.name),
+            // Nasce vuoto: chi ha in mano chi lo decide la simulazione al primo
+            // frame. Ce l'hanno anche i pezzi che non afferrano niente - un
+            // gate, una sorgente - cosi' sul bus tutti gli oggetti raccontano
+            // la stessa forma di stato invece di due forme diverse.
+            crate::engagement::Engagement::default(),
         ));
     }
 }

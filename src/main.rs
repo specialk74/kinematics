@@ -19,6 +19,8 @@ mod geometry;
 mod grid;
 mod guide;
 mod layout;
+mod mqtt;
+mod mqtt_panel;
 mod name;
 mod name_panel;
 mod piece;
@@ -43,6 +45,8 @@ use gate::GateVisualsPlugin;
 use grid::GridPlugin;
 use guide::{GuidePlugin, GuideVisualsPlugin};
 use layout::LayoutPlugin;
+use mqtt::MqttPlugin;
+use mqtt_panel::MqttPanelPlugin;
 use name::NamePlugin;
 use name_panel::NamePanelPlugin;
 use piece::PiecePlugin;
@@ -66,6 +70,9 @@ fn main() {
 
     let mut app = App::new();
     app.insert_resource(options.layout_file());
+    // I parametri del broker esistono sempre, anche se non ci si collega: sono
+    // il punto di partenza del pannello, che con la finestra puo' cambiarli.
+    app.insert_resource(options.mqtt_settings());
 
     // La simulazione e' la stessa nei due casi: cambia solo chi la guarda.
     if options.hide_gui {
@@ -105,7 +112,12 @@ fn main() {
             SensorVisualsPlugin,
         ))
         // In due gruppi perche' un gruppo solo ha un tetto di quindici.
-        .add_plugins((NamePlugin, NamePanelPlugin, GuideVisualsPlugin));
+        .add_plugins((
+            NamePlugin,
+            NamePanelPlugin,
+            GuideVisualsPlugin,
+            MqttPanelPlugin,
+        ));
     }
 
     // L'andatura si imposta sull'orologio virtuale, che c'e' in tutti e due i
@@ -116,6 +128,18 @@ fn main() {
         &mut app.world_mut().resource_mut::<Time<Virtual>>(),
         options.speed,
     );
+
+    // Ci si collega a scena gia' costruita, come la registrazione: al primo
+    // frame utile gli oggetti ci sono gia' e il loro stato parte subito.
+    if options.mqtt {
+        app.add_systems(
+            PostStartup,
+            (|mut commands: Commands, settings: Res<mqtt::MqttSettings>| {
+                mqtt::connect(&mut commands, &settings);
+            })
+            .after(layout::load_layout_at_startup),
+        );
+    }
 
     // Registrazione e riproduzione partono a scena gia' costruita: il layout
     // nasce in PostStartup, e una riproduzione porta con se' il proprio.
@@ -174,6 +198,9 @@ fn main() {
         // attraverserebbero in headless e l'impianto si comporterebbe in due
         // modi diversi a seconda che ci sia una finestra a guardarlo.
         GuidePlugin,
+        // Il filo con il programma di comando: senza finestra e' l'unico modo
+        // che l'impianto ha di ricevere ordini.
+        MqttPlugin,
     ))
     .run();
 }

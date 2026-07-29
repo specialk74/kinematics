@@ -1,6 +1,7 @@
 use clap::Parser;
 
 use crate::layout::LayoutFile;
+use crate::mqtt::MqttSettings;
 
 /// Come e' stato lanciato il programma. Le opzioni si riconoscono dal nome, non
 /// dalla posizione: l'ordine in cui si scrivono non conta.
@@ -40,11 +41,60 @@ pub struct Options {
     // farebbe passi piu' lunghi degli oggetti che deve incontrare.
     #[arg(long, value_name = "VOLTE", default_value_t = 1.0)]
     pub speed: f32,
+
+    /// Si collega al broker mqtt all'avvio. Senza, il filo resta chiuso e con
+    /// la finestra lo si apre dal pannello: e' l'unico modo che ha chi lancia
+    /// senza finestra, ed e' li' che serve, perche' headless il simulatore
+    /// esiste per farsi comandare da fuori.
+    #[arg(long)]
+    pub mqtt: bool,
+
+    /// Dove sta il broker.
+    #[arg(long = "mqtt-host", value_name = "HOST", default_value = "127.0.0.1")]
+    pub mqtt_host: String,
+
+    #[arg(long = "mqtt-port", value_name = "PORTA", default_value_t = 1883)]
+    pub mqtt_port: u16,
+
+    /// Con che nome il simulatore si presenta al broker. Due client che si
+    /// presentano uguali si buttano fuori a vicenda, quindi va cambiato se se ne
+    /// lanciano due sulla stessa rete.
+    #[arg(long = "mqtt-id", value_name = "NOME", default_value = "simulatore")]
+    pub mqtt_id: String,
+
+    /// La radice dei topic sotto cui sta tutto l'impianto.
+    #[arg(
+        long = "mqtt-prefix",
+        value_name = "PREFISSO",
+        default_value = "impianto"
+    )]
+    pub mqtt_prefix: String,
+
+    /// Credenziali, se il broker le chiede. Quello di prova no.
+    #[arg(long = "mqtt-user", value_name = "UTENTE", default_value = "")]
+    pub mqtt_user: String,
+
+    #[arg(long = "mqtt-password", value_name = "PAROLA", default_value = "")]
+    pub mqtt_password: String,
 }
 
 impl Options {
     pub fn layout_file(&self) -> LayoutFile {
         LayoutFile::new(self.layout.clone())
+    }
+
+    /// I parametri di connessione come li vuole il modulo mqtt. Sono gli stessi
+    /// che il pannello modifica: la riga di comando decide da dove si parte, non
+    /// una verita' separata.
+    pub fn mqtt_settings(&self) -> MqttSettings {
+        MqttSettings {
+            host: self.mqtt_host.clone(),
+            port: self.mqtt_port,
+            client_id: self.mqtt_id.clone(),
+            prefix: self.mqtt_prefix.clone(),
+            username: self.mqtt_user.clone(),
+            password: self.mqtt_password.clone(),
+        }
     }
 }
 
