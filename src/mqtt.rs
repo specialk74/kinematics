@@ -5,11 +5,17 @@
 //! questo il modulo sta fra i sistemi di logica e non fra quelli del disegno -
 //! senza finestra il filo serve piu' che con.
 //!
-//! Il traffico e' fatto di due mezze conversazioni, e non vanno confuse:
+//! Il traffico e' fatto di tre discorsi, e non vanno confusi:
 //!
 //! - **stato**, `<prefisso>/<nome>/stato`, dal simulatore in fuori. Ritenuto,
 //!   cosi' un programma di comando che si collega dopo trova subito com'e'
 //!   messo l'impianto invece di dover aspettare che qualcosa cambi.
+//! - **lettura**, `<prefisso>/<nome>/lettura`, dal simulatore in fuori. Non
+//!   ritenuto: non dice come stanno le cose adesso, annuncia un carrier appena
+//!   arrivato fra le mani di un oggetto. Lo stato da solo non basterebbe proprio
+//!   perche' e' ritenuto, e un ritenuto tiene solo l'ultimo valore: due carrier
+//!   che si susseguono piu' in fretta di quanto il programma di comando legga
+//!   diventerebbero uno, e con `--speed 8` non e' un caso di scuola.
 //! - **comando**, `<prefisso>/<nome>/comando`, da fuori verso il simulatore.
 //!
 //! Il nome di un oggetto e' unico e valido come topic - e' la regola che
@@ -49,6 +55,7 @@ const KEEP_ALIVE: Duration = Duration::from_secs(30);
 /// pubblica e chi si iscrive - e due stringhe uguali scritte a mano prima o poi
 /// smettono di esserlo.
 const STATE: &str = "stato";
+const READING: &str = "lettura";
 const COMMAND: &str = "comando";
 
 /// Il topic su cui il simulatore dice di esserci. Il "non ci sono" lo scrive il
@@ -134,6 +141,24 @@ struct State {
     active: bool,
     /// Se in questo istante ha un carrier fra le mani.
     engaged: bool,
+    /// Quale. Vuoto quando non ne ha nessuno, ma anche quando `engaged` e' vero
+    /// perche' un collaudatore ha acceso l'interruttore per far dichiarare una
+    /// presenza che non c'e': li' non esiste nessun carrier da nominare. La
+    /// coppia `"engaged": true, "carrier_id": null` e' l'unico modo che il
+    /// programma di comando ha di distinguere una lettura vera da una simulata.
+    carrier_id: Option<u32>,
+}
+
+/// Un carrier appena arrivato fra le mani di un oggetto.
+///
+/// Non e' uno stato ridetto in altra forma: e' un fatto avvenuto, e per questo
+/// `carrier_id` non e' facoltativo come in `State`. Una lettura senza carrier
+/// non esiste - se non c'e' nessuno da nominare non c'e' niente da annunciare.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct Reading {
+    id: u32,
+    name: String,
+    carrier_id: u32,
 }
 
 /// Quello che il programma di comando puo' cambiare. I due campi sono
@@ -410,12 +435,16 @@ fn publish(
             name: name.0.clone(),
             enabled: switch.enabled,
             active: switch.active,
-            engaged: engagement.is_some_and(|engagement| engagement.0),
+            engaged: engagement.is_some_and(|engagement| engagement.engaged),
+            carrier_id: engagement.and_then(|engagement| engagement.carrier_id),
         };
 
-        if published.0.get(&entity) == Some(&state) {
+        let previous = published.0.get(&entity);
+        if previous == Some(&state) {
             continue;
         }
+
+        let reading = read_by(previous, &state);
 
         let Ok(payload) = serde_json::to_vec(&state) else {
             continue;
@@ -436,8 +465,56 @@ fn publish(
             .is_ok()
         {
             published.0.insert(entity, state);
+
+            // Solo dopo che lo stato e' passato: se fallisse, `Published`
+            // resterebbe ferma a quello di prima e il frame dopo troveremmo di
+            // nuovo lo stesso fronte, annunciando due volte una lettura sola.
+            if let Some(carrier_id) = reading {
+                announce(&link, id.0, &name.0, carrier_id);
+            }
         }
     }
+}
+
+/// Il carrier di cui annunciare la lettura, se ce n'e' uno.
+///
+/// Regola, non travaso: sta fuori dal sistema perche' e' l'unica parte di
+/// `publish` che si puo' provare senza un broker, ed e' quella dove si sbaglia.
+///
+/// Lo stato di prima deve esistere. A filo appena aperto `Published` viene
+/// svuotata apposta, e senza questa condizione ogni riconnessione spaccerebbe
+/// per lettura appena avvenuta il carrier che in quel momento sta fermo
+/// sull'antenna - una lettura che non e' successa adesso e forse nemmeno oggi.
+fn read_by(previous: Option<&State>, state: &State) -> Option<u32> {
+    match (previous, state.carrier_id) {
+        (Some(previous), Some(carrier_id)) if previous.carrier_id != Some(carrier_id) => {
+            Some(carrier_id)
+        }
+        _ => None,
+    }
+}
+
+/// Manda in giro una lettura. `AtLeastOnce` e senza ritenuta, al contrario dello
+/// stato: un fatto avvenuto che si perde non lo rimette a posto nessuno, e
+/// lasciarlo ritenuto farebbe credere a chi si collega domani che sia appena
+/// successo.
+fn announce(link: &MqttLink, id: u32, name: &str, carrier_id: u32) {
+    let reading = Reading {
+        id,
+        name: name.to_string(),
+        carrier_id,
+    };
+
+    let Ok(payload) = serde_json::to_vec(&reading) else {
+        return;
+    };
+
+    let _ = link.client.try_publish(
+        link.settings.topic(name, READING),
+        QoS::AtLeastOnce,
+        false,
+        payload,
+    );
 }
 
 #[cfg(test)]
@@ -458,6 +535,7 @@ mod tests {
         let settings = settings();
 
         assert_eq!(settings.topic("gate-1", STATE), "impianto/gate-1/stato");
+        assert_eq!(settings.topic("gate-1", READING), "impianto/gate-1/lettura");
         assert_eq!(settings.command_filter(), "impianto/+/comando");
     }
 
@@ -527,12 +605,101 @@ mod tests {
             enabled: true,
             active: false,
             engaged: true,
+            carrier_id: None,
         };
 
         assert_eq!(
             serde_json::to_string(&state).expect("si scrive"),
-            r#"{"id":7,"name":"gate-1","enabled":true,"active":false,"engaged":true}"#
+            r#"{"id":7,"name":"gate-1","enabled":true,"active":false,"engaged":true,"carrier_id":null}"#
         );
+    }
+
+    /// L'altra meta' del contratto: con un carrier fra le mani l'id viaggia come
+    /// numero e non come stringa. Il test sopra non lo copre, perche' li' il
+    /// campo e' vuoto e `null` non dice di che tipo sarebbe stato.
+    #[test]
+    fn the_state_carries_the_id_of_the_carrier_it_is_holding() {
+        let state = State {
+            id: 7,
+            name: "gate-1".to_string(),
+            enabled: true,
+            active: false,
+            engaged: true,
+            carrier_id: Some(1),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&state).expect("si scrive"),
+            r#"{"id":7,"name":"gate-1","enabled":true,"active":false,"engaged":true,"carrier_id":1}"#
+        );
+    }
+
+    /// La forma di una lettura sul filo, contratto quanto quella dello stato.
+    /// Qui `carrier_id` e' un numero e basta: una lettura senza carrier non
+    /// esiste, e il tipo lo dice al posto di un commento.
+    #[test]
+    fn a_reading_travels_as_flat_json() {
+        let reading = Reading {
+            id: 7,
+            name: "antenna-1".to_string(),
+            carrier_id: 3,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&reading).expect("si scrive"),
+            r#"{"id":7,"name":"antenna-1","carrier_id":3}"#
+        );
+    }
+
+    fn holding(carrier_id: Option<u32>) -> State {
+        State {
+            id: 7,
+            name: "antenna-1".to_string(),
+            enabled: true,
+            active: false,
+            engaged: carrier_id.is_some(),
+            carrier_id,
+        }
+    }
+
+    /// Si annuncia il fronte di salita, non lo stato: un carrier che arriva, e
+    /// una volta sola per quanto a lungo resti li' sotto.
+    #[test]
+    fn a_reading_is_announced_when_a_carrier_arrives() {
+        let empty = holding(None);
+        let first = holding(Some(1));
+
+        assert_eq!(
+            read_by(Some(&empty), &first),
+            Some(1),
+            "e' appena arrivato: questa e' la lettura"
+        );
+        assert_eq!(
+            read_by(Some(&first), &first),
+            None,
+            "e' sempre lo stesso: la lettura e' gia' stata annunciata"
+        );
+        assert_eq!(
+            read_by(Some(&first), &empty),
+            None,
+            "andarsene non e' una lettura"
+        );
+    }
+
+    /// Due carrier che si succedono senza un istante di vuoto in mezzo: e' il
+    /// caso per cui il topic esiste. Lo stato ritenuto da solo terrebbe solo
+    /// l'ultimo, e chi legge piano vedrebbe passare un carrier invece di due.
+    #[test]
+    fn a_carrier_replacing_another_is_a_reading_of_its_own() {
+        assert_eq!(read_by(Some(&holding(Some(1))), &holding(Some(2))), Some(2));
+    }
+
+    /// A filo appena aperto non si annuncia niente. `Published` viene svuotata a
+    /// ogni collegamento, e senza questa regola una riconnessione spaccerebbe
+    /// per lettura appena avvenuta il carrier fermo sull'antenna da un'ora.
+    #[test]
+    fn a_fresh_link_announces_no_readings() {
+        assert_eq!(read_by(None, &holding(Some(1))), None);
     }
 
     /// Un comando che nomina un campo solo si legge lo stesso: e' la forma piu'

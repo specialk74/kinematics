@@ -42,9 +42,14 @@ pub trait Engaged: Component<Mutability = Mutable> {
     }
 }
 
-/// Lo stesso "ho un carrier fra le mani", ma nella forma che serve a chi non sa
+/// "Ho un carrier fra le mani, ed e' questo", nella forma che serve a chi non sa
 /// di che tipo di oggetto si tratta: mqtt pubblica lo stato di tutti gli oggetti
 /// con un messaggio solo, e non puo' chiedere a ciascuno con il suo tipo.
+///
+/// L'id sta qui per la stessa ragione per cui ci sta `engaged`: e' roba da bus,
+/// non da colore. Al programma di comando non basta sapere che un'antenna ha
+/// letto qualcosa, deve sapere chi - e la grafica, che quel dato non lo usa, non
+/// sarebbe il posto dove calcolarlo.
 ///
 /// E' una copia, e le copie di solito sono un guaio; questa la scrive un solo
 /// sistema - `mark_engaged`, nello stesso istante in cui aggiorna l'originale -
@@ -52,7 +57,14 @@ pub trait Engaged: Component<Mutability = Mutable> {
 /// era un elenco dei tipi dentro mqtt, cioe' un secondo posto da tenere
 /// d'accordo con `EngagementPlugin` ogni volta che nasce un oggetto nuovo.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Engagement(pub bool);
+pub struct Engagement {
+    pub engaged: bool,
+    /// Chi, quando c'e' qualcuno. Vuoto se l'oggetto non ha niente fra le mani,
+    /// ma anche quando `engaged` e' vero perche' un interruttore gli fa
+    /// dichiarare una presenza che non c'e': li' non esiste nessun carrier da
+    /// nominare, ed e' cosi' che una lettura vera si distingue da una simulata.
+    pub carrier_id: Option<u32>,
+}
 
 /// Vero se il carrier e' nella cella dell'oggetto. La usano svolta e
 /// inversione, la cui azione dura un frame solo - l'istante in cui cambiano la
@@ -85,19 +97,29 @@ pub fn mark_engaged<T: Engaged>(
     >,
 ) {
     for (mut object, switch, facing, at, shared) in objects {
-        let really = carriers.iter().any(|(carrier, carrier_at)| {
-            object.reaches(
-                *switch,
-                at.translation,
-                facing.0,
-                carrier,
-                carrier_at.translation,
-            )
-        });
+        let caught = carriers
+            .iter()
+            .filter(|(carrier, carrier_at)| {
+                object.reaches(
+                    *switch,
+                    at.translation,
+                    facing.0,
+                    carrier,
+                    carrier_at.translation,
+                )
+            })
+            .map(|(carrier, _)| carrier.carrier_id)
+            .min();
         // Fuori servizio non si accorge di niente. In servizio si accorge di
         // quello che passa davvero, e i sensori anche di quello che un tester
         // gli fa dichiarare a mano.
-        let engaged = switch.enabled && (really || (object.forced_by_switch() && switch.forcing()));
+        let engaged =
+            switch.enabled && (caught.is_some() || (object.forced_by_switch() && switch.forcing()));
+
+        let next = Engagement {
+            engaged,
+            carrier_id: caught.filter(|_| engaged),
+        };
 
         // Si scrive solo quando cambia davvero: il colore si aggiorna guardando
         // `Changed<T>`, e riscriverlo ogni frame lo sveglierebbe per niente.
@@ -105,9 +127,9 @@ pub fn mark_engaged<T: Engaged>(
             object.set_engaged(engaged);
         }
         if let Some(mut shared) = shared
-            && shared.0 != engaged
+            && *shared != next
         {
-            shared.0 = engaged;
+            *shared = next;
         }
     }
 }
@@ -162,6 +184,7 @@ mod tests {
                     kind: DivertKind::Divert,
                     engaged: false,
                 },
+                Engagement::default(),
             ))
             .id();
         app.world_mut().spawn((
@@ -177,6 +200,141 @@ mod tests {
         app.update();
 
         app.world().get::<Divert>(divert).expect("divert").engaged
+    }
+
+    fn carrier(carrier_id: u32) -> Carrier {
+        Carrier {
+            kind: CarrierType::Empty,
+            carrier_id,
+            sample_id: None,
+            motion: Motion::Straight(Heading::Left),
+        }
+    }
+
+    fn antenna(enabled: bool, forced: bool) -> impl Bundle {
+        (
+            Transform::default(),
+            Facing(Heading::Up),
+            Switch {
+                enabled,
+                active: forced,
+            },
+            Antenna { seeing: false },
+            Engagement::default(),
+        )
+    }
+
+    /// Come sta l'antenna dopo un giro del sistema. Torna l'`Engagement` intero
+    /// e non il solo id perche' i due fatti che porta - se si e' accorta di
+    /// qualcosa, e di chi - su un'antenna forzata divergono, e per guardarli
+    /// divergere bisogna averli tutti e due.
+    fn reading(enabled: bool, forced: bool, carrier_at: Vec3) -> Engagement {
+        let mut app = App::new();
+        app.add_plugins(EngagementPlugin);
+
+        let antenna = app.world_mut().spawn(antenna(enabled, forced)).id();
+        app.world_mut()
+            .spawn((Transform::from_translation(carrier_at), carrier(1)));
+
+        app.update();
+
+        *app.world().get::<Engagement>(antenna).expect("antenna")
+    }
+
+    fn caught(active: bool, carrier_at: Vec3) -> Option<u32> {
+        reading(active, false, carrier_at).carrier_id
+    }
+
+    #[test]
+    fn an_object_tells_which_carrier_it_is_holding() {
+        assert!(
+            caught(false, Vec3::ZERO).is_none(),
+            "fuori servizio non si accorge di niente"
+        );
+        assert!(
+            caught(true, Vec3::new(GRID_STEP, 0.0, 0.0)).is_none(),
+            "quello nella cella accanto non lo riguarda"
+        );
+        assert_eq!(
+            caught(true, Vec3::ZERO),
+            Some(1),
+            "l'antenna dichiara l'id di chi le sta sopra"
+        );
+    }
+
+    /// Un interruttore puo' far dichiarare presenza a un'antenna che non ha
+    /// niente sotto, ma non puo' farle inventare un carrier. E' la coppia che
+    /// sul bus diventa `"engaged": true, "carrier_id": null`, e che dice al
+    /// programma di comando che quella lettura gliela sta passando un
+    /// collaudatore.
+    #[test]
+    fn a_forced_object_declares_a_presence_with_nobody_to_name() {
+        let aside = Vec3::new(GRID_STEP, 0.0, 0.0);
+
+        assert!(
+            reading(true, true, aside).engaged,
+            "l'interruttore le fa dichiarare presenza lo stesso"
+        );
+        assert_eq!(
+            reading(true, true, aside).carrier_id,
+            None,
+            "ma sotto non c'e' nessuno di cui dire il nome"
+        );
+    }
+
+    /// Due carrier che si scambiano di posto sull'antenna in un colpo solo:
+    /// `engaged` e' vero prima ed e' vero dopo, cambia soltanto chi. Se
+    /// `mark_engaged` decidesse di scrivere guardando il solo booleano, come
+    /// faceva quando `Engagement` era un booleano e basta, l'antenna
+    /// continuerebbe a dichiarare il primo finche' non le passa davanti un
+    /// frame vuoto - ed e' il motivo per cui si confronta il componente intero.
+    #[test]
+    fn the_id_follows_the_carrier_even_when_the_engagement_does_not_change() {
+        let aside = Vec3::new(GRID_STEP, 0.0, 0.0);
+
+        let mut app = App::new();
+        app.add_plugins(EngagementPlugin);
+
+        let antenna = app.world_mut().spawn(antenna(true, false)).id();
+        let first = app
+            .world_mut()
+            .spawn((Transform::default(), carrier(2)))
+            .id();
+        let second = app
+            .world_mut()
+            .spawn((Transform::from_translation(aside), carrier(1)))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .get::<Engagement>(antenna)
+                .expect("antenna")
+                .carrier_id,
+            Some(2),
+            "legge chi le sta sopra, non l'id piu' basso che c'e' in giro"
+        );
+
+        app.world_mut()
+            .get_mut::<Transform>(first)
+            .expect("il primo")
+            .translation = aside;
+        app.world_mut()
+            .get_mut::<Transform>(second)
+            .expect("il secondo")
+            .translation = Vec3::ZERO;
+
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Engagement>(antenna).expect("antenna"),
+            Engagement {
+                engaged: true,
+                carrier_id: Some(1),
+            },
+            "e' cambiato il carrier, non il fatto che ce ne sia uno"
+        );
     }
 
     #[test]
